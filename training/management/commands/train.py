@@ -1,0 +1,77 @@
+import time
+from django.core.management.base import BaseCommand
+from django.conf import settings
+from training.engine.trainer import Trainer
+from training.engine.export import export_model
+from training.models import TrainingRun, TrainingMetric
+
+
+class Command(BaseCommand):
+    help = "Run PC grid training on the MIDI corpus"
+
+    def add_arguments(self, parser):
+        parser.add_argument("--midi-dir", default=settings.MIDI_DATA_DIR)
+        parser.add_argument("--grid-size", type=int, default=128)
+        parser.add_argument("--relaxation-steps", type=int, default=128)
+        parser.add_argument("--batch-size", type=int, default=16)
+        parser.add_argument("--num-steps", type=int, default=1000)
+        parser.add_argument("--checkpoint-every", type=int, default=50)
+        parser.add_argument("--export-dir", default=str(settings.BASE_DIR / "frontend" / "model"))
+        parser.add_argument("--fs", type=float, default=8.0)
+
+    def handle(self, *args, **options):
+        self.stdout.write(f"Starting training on {options['midi_dir']}")
+
+        trainer = Trainer(
+            midi_dir=options["midi_dir"],
+            grid_size=options["grid_size"],
+            relaxation_steps=options["relaxation_steps"],
+            fs=options["fs"],
+        )
+
+        run = TrainingRun.objects.create(
+            status="running",
+            config_json={k: v for k, v in options.items() if k not in ("verbosity", "settings", "pythonpath", "traceback", "no_color", "force_color", "skip_checks")},
+        )
+
+        try:
+            for step in range(1, options["num_steps"] + 1):
+                t0 = time.time()
+                avg_error = trainer.train_step(batch_size=options["batch_size"])
+                dt = time.time() - t0
+
+                TrainingMetric.objects.create(
+                    run=run,
+                    step=step,
+                    avg_error=avg_error,
+                    phase=trainer.curriculum.current_phase,
+                )
+                run.total_steps = step
+                run.latest_error = avg_error
+                run.current_phase = trainer.curriculum.current_phase
+                run.save()
+
+                self.stdout.write(
+                    f"Step {step}/{options['num_steps']} | "
+                    f"Error: {avg_error:.6f} | "
+                    f"Phase: {trainer.curriculum.current_phase} | "
+                    f"Time: {dt:.1f}s"
+                )
+
+                if step % options["checkpoint_every"] == 0:
+                    ckpt_path = f"{settings.CHECKPOINT_DIR}/step_{step}"
+                    trainer.save_checkpoint(ckpt_path)
+                    self.stdout.write(f"  Checkpoint saved: {ckpt_path}")
+
+        except KeyboardInterrupt:
+            self.stdout.write("\nTraining interrupted.")
+        finally:
+            run.status = "stopped"
+            run.save()
+
+            export_model(
+                trainer.grid,
+                trainer.batch_gen.vocabulary,
+                options["export_dir"],
+            )
+            self.stdout.write(f"Model exported to {options['export_dir']}")
