@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+db.sqlite3
+midi_data/
+checkpoints/
+*.bin
+.venv/
+node_modules/
