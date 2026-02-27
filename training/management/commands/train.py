@@ -1,6 +1,7 @@
 import time
 from django.core.management.base import BaseCommand
 from django.conf import settings
+from corpus.services.dataset_scanner import scan_datasets
 from training.engine.trainer import Trainer
 from training.engine.export import export_model
 from training.models import TrainingRun, TrainingMetric
@@ -18,15 +19,24 @@ class Command(BaseCommand):
         parser.add_argument("--checkpoint-every", type=int, default=50)
         parser.add_argument("--export-dir", default=str(settings.BASE_DIR / "frontend" / "model"))
         parser.add_argument("--fs", type=float, default=8.0)
+        parser.add_argument("--datasets", nargs="*", default=None,
+                            help="Which datasets to use (lakh, aam, slakh). Default: all detected.")
 
     def handle(self, *args, **options):
-        self.stdout.write(f"Starting training on {options['midi_dir']}")
+        self.stdout.write(f"Scanning datasets in {options['midi_dir']}...")
+        scan_results = scan_datasets(options["midi_dir"], datasets=options["datasets"])
+        self.stdout.write(f"Found {len(scan_results)} songs")
+
+        if not scan_results:
+            self.stderr.write("No MIDI files found. Check --midi-dir path.")
+            return
 
         trainer = Trainer(
             midi_dir=options["midi_dir"],
             grid_size=options["grid_size"],
             relaxation_steps=options["relaxation_steps"],
             fs=options["fs"],
+            scan_results=scan_results,
         )
 
         run = TrainingRun.objects.create(
