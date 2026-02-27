@@ -2,18 +2,30 @@ import jax
 import jax.numpy as jnp
 
 
-def pc_relaxation_step(state, weights, params):
+ACTIVATIONS = {
+    "tanh": jnp.tanh,
+    "sigmoid": jax.nn.sigmoid,
+    "relu": jax.nn.relu,
+    "leaky_relu": jax.nn.leaky_relu,
+    "linear": lambda x: x,
+}
+
+
+def pc_relaxation_step(state, weights, params, activation_fn=None):
     """One relaxation step of the PC grid. All neurons update simultaneously.
 
     Args:
         state: (H, W, 4) -- channels: r, e, s, h
         weights: (H, W, 4) -- channels: w_left, w_right, w_up, w_down
         params: (H, W, 4) -- channels: alpha, beta, lr, bias
+        activation_fn: callable, defaults to jnp.tanh
 
     Returns:
         new_state: (H, W, 4)
         new_weights: (H, W, 4) -- updated via iPC
     """
+    if activation_fn is None:
+        activation_fn = jnp.tanh
     r = state[:, :, 0]
     e = state[:, :, 1]
     s = state[:, :, 2]
@@ -30,7 +42,7 @@ def pc_relaxation_step(state, weights, params):
     bias = params[:, :, 3]
 
     # Activation function
-    r_act = jnp.tanh(r)
+    r_act = activation_fn(r)
 
     # Gather neighbor representations using zero-padding at boundaries
     # r_left: the neighbor to the left of each neuron (i.e., value at col-1)
@@ -65,7 +77,7 @@ def pc_relaxation_step(state, weights, params):
 
     # Update temporal state
     new_s = alpha * s + (1.0 - alpha) * r
-    new_h = beta * jnp.tanh(h)
+    new_h = beta * activation_fn(h)
 
     # Representation update
     new_r = r + lr * (-new_e + neighbor_error_signal + new_h + new_s - r)

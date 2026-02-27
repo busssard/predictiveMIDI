@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -57,3 +60,29 @@ class CorpusVocabularyView(APIView):
         if not scan:
             return Response({"error": "No scan yet."}, status=status.HTTP_404_NOT_FOUND)
         return Response({"vocabulary": scan.vocabulary_json})
+
+
+class CorpusStatsView(APIView):
+    """GET corpus statistics from the index file."""
+
+    def get(self, request):
+        index_path = Path(settings.BASE_DIR) / "data" / "corpus_index.json"
+        if not index_path.exists():
+            return Response(
+                {"error": "No corpus index found. Run: python manage.py build_corpus_index"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        with open(index_path) as f:
+            index_data = json.load(f)
+
+        by_dataset = {}
+        for song in index_data.get("songs", []):
+            ds = song.get("dataset", "unknown")
+            by_dataset[ds] = by_dataset.get(ds, 0) + 1
+
+        return Response({
+            "total_songs": len(index_data.get("songs", [])),
+            "by_dataset": by_dataset,
+            "vocabulary": index_data.get("vocabulary", {}),
+            "num_instruments": len(index_data.get("vocabulary", {})),
+        })

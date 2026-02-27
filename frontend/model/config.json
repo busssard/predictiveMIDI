@@ -1,0 +1,24 @@
+{
+  "grid_size": 128,
+  "num_instruments": 16,
+  "vocabulary": {
+    "bass": 0,
+    "brass": 1,
+    "chromatic_percussion": 2,
+    "drums": 3,
+    "ensemble": 4,
+    "ethnic": 5,
+    "guitar": 6,
+    "organ": 7,
+    "percussive": 8,
+    "piano": 9,
+    "pipe": 10,
+    "reed": 11,
+    "sound_fx": 12,
+    "strings": 13,
+    "synth": 14,
+    "synth_fx": 15
+  },
+  "channels_per_texture": 4,
+  "dtype": "float32"
+}

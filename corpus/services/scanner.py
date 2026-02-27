@@ -1,6 +1,25 @@
 from pathlib import Path
 import pretty_midi
 
+# Monkey-patch mido to tolerate invalid key signatures (e.g. 8-11 sharps
+# found in many AAM MIDI files).  We replace the decode method on the
+# key_signature MetaSpec so it falls back to 'C' instead of raising.
+import types
+import mido.midifiles.meta as _mido_meta
+
+_ks_spec = _mido_meta._META_SPECS[0x59]
+_orig_ks_decode = _ks_spec.decode.__func__  # unwrap bound method
+
+
+def _lenient_ks_decode(self, message, data):
+    try:
+        _orig_ks_decode(self, message, data)
+    except _mido_meta.KeySignatureError:
+        message.key = 'C'
+
+
+_ks_spec.decode = types.MethodType(_lenient_ks_decode, _ks_spec)
+
 
 def scan_midi_file(path):
     """Extract metadata from a single MIDI file.

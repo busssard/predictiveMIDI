@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from corpus.services.dataset_scanner import scan_datasets
@@ -21,23 +22,45 @@ class Command(BaseCommand):
         parser.add_argument("--fs", type=float, default=8.0)
         parser.add_argument("--datasets", nargs="*", default=None,
                             help="Which datasets to use (lakh, aam, slakh). Default: all detected.")
+        parser.add_argument("--index-path", default=None,
+                            help="Path to corpus_index.json. Auto-detects data/corpus_index.json.")
 
     def handle(self, *args, **options):
-        self.stdout.write(f"Scanning datasets in {options['midi_dir']}...")
-        scan_results = scan_datasets(options["midi_dir"], datasets=options["datasets"])
-        self.stdout.write(f"Found {len(scan_results)} songs")
+        # Auto-detect corpus index
+        index_path = options.get("index_path")
+        if index_path is None:
+            default_index = Path(settings.BASE_DIR) / "data" / "corpus_index.json"
+            if default_index.exists():
+                index_path = str(default_index)
 
-        if not scan_results:
-            self.stderr.write("No MIDI files found. Check --midi-dir path.")
-            return
+        if index_path:
+            self.stdout.write(f"Loading corpus index from {index_path}")
+            trainer = Trainer(
+                midi_dir=options["midi_dir"],
+                grid_size=options["grid_size"],
+                relaxation_steps=options["relaxation_steps"],
+                fs=options["fs"],
+                index_path=index_path,
+                prefetch=True,
+            )
+            self.stdout.write(f"Loaded {len(trainer.batch_gen.song_paths)} songs from index")
+        else:
+            self.stdout.write(f"Scanning datasets in {options['midi_dir']}...")
+            scan_results = scan_datasets(options["midi_dir"], datasets=options["datasets"])
+            self.stdout.write(f"Found {len(scan_results)} songs")
 
-        trainer = Trainer(
-            midi_dir=options["midi_dir"],
-            grid_size=options["grid_size"],
-            relaxation_steps=options["relaxation_steps"],
-            fs=options["fs"],
-            scan_results=scan_results,
-        )
+            if not scan_results:
+                self.stderr.write("No MIDI files found. Check --midi-dir path.")
+                return
+
+            trainer = Trainer(
+                midi_dir=options["midi_dir"],
+                grid_size=options["grid_size"],
+                relaxation_steps=options["relaxation_steps"],
+                fs=options["fs"],
+                scan_results=scan_results,
+                prefetch=True,
+            )
 
         run = TrainingRun.objects.create(
             status="running",

@@ -1,22 +1,103 @@
 from pathlib import Path
+import functools
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
 import numpy as np
 from training.engine.grid import create_grid
-from training.engine.update_rule import pc_relaxation_step, apply_clamping
+from training.engine.update_rule import pc_relaxation_step, apply_clamping, ACTIVATIONS
 from corpus.services.batch_generator import BatchGenerator
 from corpus.services.curriculum import CurriculumScheduler
 
 
+def _make_train_fn(relaxation_steps, activation_fn=None):
+    """Build a JIT-compiled function that processes a full batch on GPU.
+
+    Uses lax.scan over ticks (sequential — state carries forward) and
+    jax.vmap over the batch dimension (parallel — independent examples).
+    """
+    if activation_fn is None:
+        activation_fn = jnp.tanh
+
+    @jax.jit
+    def train_fn(state, weights, params,
+                 all_inputs, all_targets, all_conds,
+                 input_mask, output_mask, conditioning_mask):
+        """
+        Args:
+            state:   (H, W, 4)  — initial grid state (shared across batch)
+            weights: (H, W, 4)  — initial weights (shared across batch)
+            params:  (H, W, 4)  — grid params (fixed)
+            all_inputs:  (B, T, H) — input values per batch item per tick
+            all_targets: (B, T, H) — target values per batch item per tick
+            all_conds:   (B, H)    — conditioning values per batch item
+            input_mask, output_mask, conditioning_mask: (H, W) bool
+
+        Returns:
+            new_weights: (H, W, 4) — averaged across batch
+            avg_error: scalar
+        """
+
+        def process_example(inputs_seq, targets_seq, cond_vals):
+            """Process one example: scan over ticks."""
+
+            def process_tick(carry, tick_data):
+                st, wt = carry
+                inp, tgt = tick_data
+
+                def relax_step(carry, _):
+                    s, w = carry
+                    s, w = pc_relaxation_step(s, w, params, activation_fn)
+                    s = apply_clamping(s, input_mask, inp, channel=0)
+                    s = apply_clamping(s, output_mask, tgt, channel=0)
+                    s = apply_clamping(s, conditioning_mask, cond_vals, channel=0)
+                    return (s, w), jnp.abs(s[:, :, 1]).mean()
+
+                (new_st, new_wt), errors = lax.scan(
+                    relax_step, (st, wt), None, length=relaxation_steps
+                )
+                return (new_st, new_wt), errors[-1]
+
+            (_, final_weights), tick_errors = lax.scan(
+                process_tick, (state, weights), (inputs_seq, targets_seq)
+            )
+            return final_weights, tick_errors.mean()
+
+        # vmap over batch: each example starts from same state/weights
+        all_weights, all_errors = jax.vmap(process_example)(
+            all_inputs, all_targets, all_conds
+        )
+
+        # Average weight updates across batch (mini-batch iPC)
+        new_weights = jnp.mean(all_weights, axis=0)
+        avg_error = jnp.mean(all_errors)
+
+        return new_weights, avg_error
+
+    return train_fn
+
+
 class Trainer:
     def __init__(self, midi_dir, grid_size=128, relaxation_steps=128,
-                 fs=8.0, key=None):
+                 fs=8.0, key=None, scan_results=None, index_path=None,
+                 prefetch=False, prefetch_depth=3, activation="tanh"):
         self.grid_size = grid_size
         self.relaxation_steps = relaxation_steps
         self.fs = fs
+        self.activation_name = activation
+        self._activation_fn = ACTIVATIONS.get(activation, jnp.tanh)
 
-        self.batch_gen = BatchGenerator(midi_dir, snippet_ticks=16, fs=fs)
+        self.batch_gen = BatchGenerator(
+            midi_dir, snippet_ticks=16, fs=fs,
+            scan_results=scan_results, index_path=index_path,
+        )
+        if prefetch:
+            from corpus.services.prefetch import PrefetchBatchGenerator
+            self._batch_source = PrefetchBatchGenerator(
+                self.batch_gen, queue_depth=prefetch_depth
+            )
+        else:
+            self._batch_source = self.batch_gen
         self.curriculum = CurriculumScheduler()
         num_instruments = len(self.batch_gen.vocabulary)
 
@@ -26,95 +107,55 @@ class Trainer:
             size=grid_size, num_instruments=num_instruments, key=key
         )
 
-    def _build_cond_vals(self, cond_vec):
-        """Expand one-hot conditioning vector to grid-row-sized array."""
-        cond_vals = jnp.zeros(self.grid_size)
-        num_inst = len(cond_vec)
-        cond_start = (self.grid_size - num_inst) // 2
-        cond_vals = cond_vals.at[cond_start:cond_start + num_inst].set(
-            jnp.array(cond_vec)
-        )
-        return cond_vals
+        self._train_fn = _make_train_fn(relaxation_steps, self._activation_fn)
 
-    def _run_tick(self, state, weights, params, input_vals, target_vals,
-                  cond_vals, input_mask, output_mask, conditioning_mask,
-                  steps, training=True):
-        """Run relaxation steps for one musical tick."""
-        def step_fn(carry, _):
-            st, wt = carry
-            st, wt = pc_relaxation_step(st, wt, params)
-            # Re-clamp
-            st = apply_clamping(st, input_mask, input_vals, channel=0)
-            if training:
-                st = apply_clamping(st, output_mask, target_vals, channel=0)
-            st = apply_clamping(st, conditioning_mask, cond_vals, channel=0)
-            error = jnp.abs(st[:, :, 1]).mean()
-            return (st, wt), error
-
-        (final_state, final_weights), errors = lax.scan(
-            step_fn, (state, weights), None, length=steps
+    def _build_all_conds(self, conditioning):
+        """Vectorized: expand conditioning vectors for the whole batch."""
+        batch_size, num_cat = conditioning.shape
+        cond_start = (self.grid_size - num_cat) // 2
+        all_conds = jnp.zeros((batch_size, self.grid_size))
+        all_conds = all_conds.at[:, cond_start:cond_start + num_cat].set(
+            jnp.array(conditioning)
         )
-        return final_state, final_weights, errors
+        return all_conds
 
     def train_step(self, batch_size=32):
-        """Run one training step: generate batch, process each tick."""
-        self.batch_gen.snippet_ticks = self.curriculum.snippet_ticks
-        batch = self.batch_gen.generate_batch(batch_size)
+        """Run one training step: generate batch, process on GPU."""
+        self._batch_source.snippet_ticks = self.curriculum.snippet_ticks
+        batch = self._batch_source.generate_batch(batch_size)
 
-        total_error = 0.0
-        num_ticks = batch["input"].shape[1]
+        all_inputs = jnp.array(batch["input"][:, :, :self.grid_size])
+        all_targets = jnp.array(batch["target"][:, :, :self.grid_size])
+        all_conds = self._build_all_conds(batch["conditioning"])
 
-        for b in range(batch_size):
-            state = self.grid.state
-            weights = self.grid.weights
+        new_weights, avg_error = self._train_fn(
+            self.grid.state, self.grid.weights, self.grid.params,
+            all_inputs, all_targets, all_conds,
+            self.grid.input_mask, self.grid.output_mask,
+            self.grid.conditioning_mask,
+        )
 
-            for t in range(num_ticks):
-                input_vals = jnp.array(batch["input"][b, t, :self.grid_size])
-                target_vals = jnp.array(batch["target"][b, t, :self.grid_size])
-                cond_vals = self._build_cond_vals(batch["conditioning"][b])
-
-                state, weights, errors = self._run_tick(
-                    state, weights, self.grid.params,
-                    input_vals, target_vals, cond_vals,
-                    self.grid.input_mask, self.grid.output_mask,
-                    self.grid.conditioning_mask,
-                    self.relaxation_steps,
-                    training=True,
-                )
-                total_error += float(errors[-1])
-
-            self.grid.weights = weights
-
-        avg_error = total_error / (batch_size * num_ticks)
+        self.grid.weights = new_weights
+        avg_error = float(avg_error)
         self.curriculum.report_error(avg_error)
         return avg_error
 
     def evaluate_error(self, batch_size=4):
         """Evaluate current error without updating weights."""
-        self.batch_gen.snippet_ticks = self.curriculum.snippet_ticks
-        batch = self.batch_gen.generate_batch(batch_size)
+        self._batch_source.snippet_ticks = self.curriculum.snippet_ticks
+        batch = self._batch_source.generate_batch(batch_size)
 
-        total_error = 0.0
-        num_ticks = batch["input"].shape[1]
+        all_inputs = jnp.array(batch["input"][:, :, :self.grid_size])
+        all_targets = jnp.array(batch["target"][:, :, :self.grid_size])
+        all_conds = self._build_all_conds(batch["conditioning"])
 
-        for b in range(batch_size):
-            state = self.grid.state
-            for t in range(num_ticks):
-                input_vals = jnp.array(batch["input"][b, t, :self.grid_size])
-                target_vals = jnp.array(batch["target"][b, t, :self.grid_size])
-                cond_vals = self._build_cond_vals(batch["conditioning"][b])
-
-                state, _, errors = self._run_tick(
-                    state, self.grid.weights, self.grid.params,
-                    input_vals, target_vals, cond_vals,
-                    self.grid.input_mask, self.grid.output_mask,
-                    self.grid.conditioning_mask,
-                    self.relaxation_steps,
-                    training=True,
-                )
-                total_error += float(errors[-1])
-
-        return total_error / (batch_size * num_ticks)
+        _, avg_error = self._train_fn(
+            self.grid.state, self.grid.weights, self.grid.params,
+            all_inputs, all_targets, all_conds,
+            self.grid.input_mask, self.grid.output_mask,
+            self.grid.conditioning_mask,
+        )
+        return float(avg_error)
 
     def save_checkpoint(self, path):
         """Save grid state, weights, and params as numpy arrays."""
