@@ -26,12 +26,15 @@ class Command(BaseCommand):
                             help="Path to corpus_index.json. Auto-detects data/corpus_index.json.")
 
     def handle(self, *args, **options):
-        # Auto-detect corpus index
+        # Auto-detect corpus index (single file or split parts)
         index_path = options.get("index_path")
         if index_path is None:
             default_index = Path(settings.BASE_DIR) / "data" / "corpus_index.json"
+            split_parts = sorted(default_index.parent.glob("corpus_index_*.json"))
             if default_index.exists():
                 index_path = str(default_index)
+            elif split_parts:
+                index_path = str(split_parts[0])
 
         if index_path:
             self.stdout.write(f"Loading corpus index from {index_path}")

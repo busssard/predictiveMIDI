@@ -27,8 +27,7 @@ class BatchGenerator:
             songs = scan_results
             self.vocabulary = build_vocabulary(songs)
         elif index_path is not None:
-            with open(index_path) as f:
-                index_data = json.load(f)
+            index_data = self._load_index(index_path)
             songs = index_data["songs"]
             self.vocabulary = index_data["vocabulary"]
         else:
@@ -41,6 +40,29 @@ class BatchGenerator:
         self.song_paths = [_song_key(s) for s in songs]
         self._scan_results = songs
         self._scan_by_path = {_song_key(s): s for s in songs}
+
+    @staticmethod
+    def _load_index(index_path):
+        """Load corpus index, merging split files if present.
+
+        Accepts a single JSON file or a path like 'data/corpus_index.json'
+        where split parts (corpus_index_1.json, corpus_index_2.json, ...)
+        exist alongside or instead of the single file.
+        """
+        p = Path(index_path)
+        parts = sorted(p.parent.glob(p.stem.replace("_1", "").replace("_2", "") + "_*.json"))
+        if parts:
+            merged = None
+            for part_path in parts:
+                with open(part_path) as f:
+                    data = json.load(f)
+                if merged is None:
+                    merged = data
+                else:
+                    merged["songs"].extend(data["songs"])
+            return merged
+        with open(index_path) as f:
+            return json.load(f)
 
     def _load_piano_rolls(self, path):
         """Load a MIDI file and return per-instrument piano rolls.

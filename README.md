@@ -65,7 +65,7 @@ uv sync --extra cpu --extra dev
 # Download a dataset (AAM is smallest, ~120 MB)
 uv run python download_midi_datasets.py aam
 
-# Build corpus index (or use the included pre-built one with ~4,700 songs)
+# Build corpus index (or use the included pre-built one with ~162K songs)
 uv run python manage.py build_corpus_index
 
 # Train
@@ -90,7 +90,7 @@ uv run python download_midi_datasets.py aam slakh    # AAM + Slakh
 uv run python download_midi_datasets.py              # all three
 ```
 
-A pre-built corpus index (`data/corpus_index.json`) with ~4,700 songs (AAM + Slakh) is included so the project structure can be explored without downloading the full datasets. Rebuild after downloading more data with `uv run python manage.py build_corpus_index`.
+A pre-built corpus index with ~162K songs (Lakh + AAM + Slakh) is included as two split files (`data/corpus_index_1.json` and `data/corpus_index_2.json`) to stay under GitHub's 100 MB file size limit. The loading code merges them automatically. Rebuild after downloading more data with `uv run python manage.py build_corpus_index`.
 
 ## Training
 
@@ -159,7 +159,8 @@ frontend/                   WebGL visualization + jam mode
     shaders/                    PC compute + rendering shaders
 
 data/
-    corpus_index.json           Pre-built song metadata index
+    corpus_index_1.json         Pre-built song metadata index (split for GitHub)
+    corpus_index_2.json         (merged automatically at load time)
     midi/                       Downloaded datasets (not in repo)
 
 docs/                       Design documents and dataset documentation
