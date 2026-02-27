@@ -53,8 +53,8 @@ Each musical time step runs 128 relaxation steps. Per relaxation step, every cel
 ## Quick start
 
 ```bash
-git clone https://github.com/1726/pcjam.git
-cd pcjam
+git clone https://github.com/busssard/predictiveMIDI.git
+cd predictiveMIDI
 
 # Install with GPU support
 uv sync --extra cuda --extra dev
