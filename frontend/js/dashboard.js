@@ -24,6 +24,12 @@ const API = {
     stop:   ()     => API.post('/training/stop/'),
 };
 
+// --- Field docs ---
+const FIELD_DOCS = {
+    pos_weight: 'Upweights active (non-zero) notes at input/output boundaries. Counteracts the ~96% silence in piano rolls. Default 20 = active notes matter 20\u00d7 more than silence.',
+    lambda_sparse: 'L1 sparsity penalty on representations: <code>r -= \u03bb\u00b7sign(r)</code>. Pushes inactive neurons toward zero. Start with 0.01.',
+};
+
 // --- DOM ---
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
@@ -111,6 +117,12 @@ function updateStatusUI(st) {
     } else {
         $('#status-error').style.display = 'none';
     }
+
+    if (st.active_error != null) {
+        $('#stat-active-error').textContent = st.active_error.toFixed(6);
+    } else {
+        $('#stat-active-error').textContent = '-';
+    }
 }
 
 function setConfigDisabled(disabled) {
@@ -145,13 +157,24 @@ async function handleTrainButton() {
 
 function readConfig() {
     return {
-        grid_size:        parseInt($('#cfg-grid-size').value),
+        grid_width:       parseInt($('#cfg-grid-width').value),
+        grid_height:      parseInt($('#cfg-grid-height').value),
         relaxation_steps: parseInt($('#cfg-relax').value),
         batch_size:       parseInt($('#cfg-batch').value),
         num_steps:        parseInt($('#cfg-steps').value),
         checkpoint_every: parseInt($('#cfg-checkpoint').value),
         fs:               parseFloat($('#cfg-fs').value),
         activation:       $('#cfg-activation').value,
+        connectivity:     $('#cfg-connectivity').value,
+        lr:               parseFloat($('#cfg-lr').value),
+        lr_w:             parseFloat($('#cfg-lr-w').value),
+        pos_weight:       parseFloat($('#cfg-pos-weight').value),
+        lambda_sparse:    parseFloat($('#cfg-lambda-sparse').value),
+        spike_boost:      parseFloat($('#cfg-spike-boost').value),
+        state_momentum:   parseFloat($('#cfg-state-momentum').value),
+        asl_gamma_neg:    parseFloat($('#cfg-asl-gamma-neg').value),
+        asl_margin:       parseFloat($('#cfg-asl-margin').value),
+        lr_amplification: parseFloat($('#cfg-lr-amplification').value),
     };
 }
 

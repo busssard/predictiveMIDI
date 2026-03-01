@@ -47,6 +47,24 @@
             letter-spacing: 0.25em;
             color: var(--text-hi);
         }
+        .header-nav {
+            display: flex;
+            gap: 16px;
+        }
+        .header-nav a {
+            color: var(--text);
+            text-decoration: none;
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: 2px 0;
+            border-bottom: 1px solid transparent;
+        }
+        .header-nav a:hover { color: var(--text-hi); }
+        .header-nav a.active {
+            color: var(--text-bright);
+            border-bottom-color: var(--accent);
+        }
         .header-status {
             display: flex;
             align-items: center;
@@ -243,6 +261,11 @@
 <body>
     <div class="header">
         <h1>PCJAM</h1>
+        <nav class="header-nav">
+            <a href="/static/design.html">Design</a>
+            <a href="/static/dashboard.html" class="active">Training</a>
+            <a href="/static/index.html">Jam</a>
+        </nav>
         <div class="header-status">
             <span id="status-label" class="status-text">IDLE</span>
             <span id="status-dot" class="dot idle"></span>
@@ -261,12 +284,16 @@
             <div class="panel-title">Training Config</div>
             <div class="config-grid">
                 <div class="config-field">
-                    <label>Grid Size</label>
-                    <input id="cfg-grid-size" class="config-input" type="number" value="128">
+                    <label>Grid Width</label>
+                    <input id="cfg-grid-width" class="config-input" type="number" value="16">
+                </div>
+                <div class="config-field">
+                    <label>Grid Height</label>
+                    <input id="cfg-grid-height" class="config-input" type="number" value="128">
                 </div>
                 <div class="config-field">
                     <label>Relaxation Steps</label>
-                    <input id="cfg-relax" class="config-input" type="number" value="128">
+                    <input id="cfg-relax" class="config-input" type="number" value="64">
                 </div>
                 <div class="config-field">
                     <label>Batch Size</label>
@@ -287,16 +314,63 @@
                 <div class="config-field">
                     <label>Activation</label>
                     <select id="cfg-activation" class="config-input">
-                        <option value="tanh" selected>tanh</option>
+                        <option value="tanh">tanh</option>
                         <option value="sigmoid">sigmoid</option>
                         <option value="relu">relu</option>
-                        <option value="leaky_relu">leaky_relu</option>
+                        <option value="leaky_relu" selected>leaky_relu</option>
                         <option value="linear">linear</option>
                     </select>
+                </div>
+                <div class="config-field">
+                    <label>Connectivity</label>
+                    <select id="cfg-connectivity" class="config-input">
+                        <option value="neighbor" selected>neighbor</option>
+                        <option value="fc">fc</option>
+                        <option value="fc_double">fc_double</option>
+                    </select>
+                </div>
+                <div class="config-field">
+                    <label>Learning Rate</label>
+                    <input id="cfg-lr" class="config-input" type="number" value="0.005" step="0.001" min="0">
+                </div>
+                <div class="config-field">
+                    <label>Weight LR</label>
+                    <input id="cfg-lr-w" class="config-input" type="number" value="0.001" step="0.0005" min="0">
+                </div>
+                <div class="config-field">
+                    <label>Pos Weight</label>
+                    <input id="cfg-pos-weight" class="config-input" type="number" value="20" step="1" min="1">
+                </div>
+                <div class="config-field">
+                    <label>Sparsity (&lambda;)</label>
+                    <input id="cfg-lambda-sparse" class="config-input" type="number" value="0.01" step="0.005" min="0">
+                </div>
+                <div class="config-field">
+                    <label>Spike Boost</label>
+                    <input id="cfg-spike-boost" class="config-input" type="number" value="5.0" step="1" min="0">
+                </div>
+                <div class="config-field">
+                    <label>State Momentum</label>
+                    <input id="cfg-state-momentum" class="config-input" type="number" value="0.9" step="0.1" min="0" max="1">
+                </div>
+                <div class="config-field">
+                    <label>ASL Gamma Neg</label>
+                    <input id="cfg-asl-gamma-neg" class="config-input" type="number" value="4.0" step="0.5" min="0">
+                </div>
+                <div class="config-field">
+                    <label>ASL Margin</label>
+                    <input id="cfg-asl-margin" class="config-input" type="number" value="0.05" step="0.01" min="0">
+                </div>
+                <div class="config-field">
+                    <label>LR Amplification</label>
+                    <input id="cfg-lr-amplification" class="config-input" type="number" value="0.0" step="0.1" min="0">
                 </div>
             </div>
             <button id="btn-train" class="btn-train">START TRAINING</button>
             <div id="status-error"></div>
+            <div id="train-stats" style="margin-top:8px; font-size:10px;">
+                <div>Active error: <span id="stat-active-error" style="color:var(--text-hi);">-</span></div>
+            </div>
         </div>
 
         <!-- Loss chart -->

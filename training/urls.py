@@ -2,7 +2,8 @@ from django.urls import path
 from training.views import (
     TrainingConfigView, TrainingMetricsView,
     TrainingStartView, TrainingStopView, TrainingStatusView,
-    TrainingRunsListView,
+    TrainingRunsListView, CheckpointListView, ExportCheckpointView,
+    ModelListView, LayoutListView, LayoutDetailView,
 )
 
 urlpatterns = [
@@ -12,4 +13,9 @@ urlpatterns = [
     path("stop/", TrainingStopView.as_view(), name="training-stop"),
     path("status/", TrainingStatusView.as_view(), name="training-status"),
     path("runs/", TrainingRunsListView.as_view(), name="training-runs"),
+    path("checkpoints/", CheckpointListView.as_view(), name="training-checkpoints"),
+    path("export-checkpoint/", ExportCheckpointView.as_view(), name="training-export-checkpoint"),
+    path("models/", ModelListView.as_view(), name="training-models"),
+    path("layouts/", LayoutListView.as_view(), name="layout-list"),
+    path("layouts/<int:pk>/", LayoutDetailView.as_view(), name="layout-detail"),
 ]

@@ -1,6 +1,8 @@
+import math
 import threading
 import time
 import logging
+from collections import defaultdict
 from pathlib import Path
 
 from django.conf import settings
@@ -31,6 +33,7 @@ class TrainingRunner:
                     obj._stop_event = threading.Event()
                     obj._run_id = None
                     obj._error_msg = None
+                    obj._stats = {}
                     cls._instance = obj
         return cls._instance
 
@@ -43,6 +46,7 @@ class TrainingRunner:
             "running": self.is_running,
             "run_id": self._run_id,
             "error": self._error_msg,
+            **self._stats,
         }
 
     def start(self, config):
@@ -64,41 +68,75 @@ class TrainingRunner:
     def _train_loop(self, config):
         run = None
         try:
-            # Auto-detect corpus index
+            # Auto-detect corpus index (single file or split parts)
             index_path = None
             default_index = Path(settings.BASE_DIR) / "data" / "corpus_index.json"
+            split_parts = sorted(default_index.parent.glob("corpus_index_*.json"))
             if default_index.exists():
                 index_path = str(default_index)
+            elif split_parts:
+                index_path = str(split_parts[0])
 
             midi_dir = getattr(settings, "MIDI_DATA_DIR", str(Path(settings.BASE_DIR) / "midi_data"))
 
-            activation = config.get("activation", "tanh")
+            activation = config.get("activation", "leaky_relu")
+            lr = float(config.get("lr", 0.005))
+            lr_w = float(config.get("lr_w", 0.001))
+            alpha = float(config.get("alpha", 0.9))
+            beta = float(config.get("beta", 0.1))
+            connectivity = config.get("connectivity", "neighbor")
+            state_momentum = float(config.get("state_momentum", 0.9))
+            spike_boost = float(config.get("spike_boost", 5.0))
+            asl_gamma_neg = float(config.get("asl_gamma_neg", 4.0))
+            asl_margin = float(config.get("asl_margin", 0.05))
+            lr_amplification = float(config.get("lr_amplification", 0.0))
+
+            curriculum_config = config.get("curriculum", {})
+            curriculum_phases = curriculum_config.get("phases")
+            curriculum_patience = curriculum_config.get("patience", 10)
+
+            # Convert phase keys from string (JSON) to int if needed
+            if curriculum_phases:
+                curriculum_phases = {
+                    int(k): v for k, v in curriculum_phases.items()
+                }
+
+            pos_weight = float(config.get("pos_weight", 20.0))
+            lambda_sparse = float(config.get("lambda_sparse", 0.01))
+
+            trainer_kwargs = dict(
+                midi_dir=midi_dir,
+                grid_width=config.get("grid_width", config.get("grid_size", 16)),
+                grid_height=config.get("grid_height", config.get("grid_size", 128)),
+                relaxation_steps=config.get("relaxation_steps", 64),
+                fs=config.get("fs", 8.0),
+                prefetch=True,
+                activation=activation,
+                lr=lr,
+                lr_w=lr_w,
+                alpha=alpha,
+                beta=beta,
+                curriculum_phases=curriculum_phases,
+                curriculum_patience=curriculum_patience,
+                pos_weight=pos_weight,
+                lambda_sparse=lambda_sparse,
+                connectivity=connectivity,
+                state_momentum=state_momentum,
+                spike_boost=spike_boost,
+                asl_gamma_neg=asl_gamma_neg,
+                asl_margin=asl_margin,
+                lr_amplification=lr_amplification,
+            )
 
             if index_path:
-                trainer = Trainer(
-                    midi_dir=midi_dir,
-                    grid_size=config.get("grid_size", 128),
-                    relaxation_steps=config.get("relaxation_steps", 128),
-                    fs=config.get("fs", 8.0),
-                    index_path=index_path,
-                    prefetch=True,
-                    activation=activation,
-                )
+                trainer = Trainer(index_path=index_path, **trainer_kwargs)
             else:
                 from corpus.services.dataset_scanner import scan_datasets
                 scan_results = scan_datasets(midi_dir)
                 if not scan_results:
                     self._error_msg = "No MIDI files found"
                     return
-                trainer = Trainer(
-                    midi_dir=midi_dir,
-                    grid_size=config.get("grid_size", 128),
-                    relaxation_steps=config.get("relaxation_steps", 128),
-                    fs=config.get("fs", 8.0),
-                    scan_results=scan_results,
-                    prefetch=True,
-                    activation=activation,
-                )
+                trainer = Trainer(scan_results=scan_results, **trainer_kwargs)
 
             run = TrainingRun.objects.create(
                 status="running",
@@ -109,12 +147,83 @@ class TrainingRunner:
             num_steps = config.get("num_steps", 1000)
             batch_size = config.get("batch_size", 16)
             checkpoint_every = config.get("checkpoint_every", 50)
+            fs = config.get("fs", 8.0)
+
+            total_samples = 0
+            total_ticks = 0
+            dataset_counts = defaultdict(int)
+            self._stats = {
+                "total_samples": 0,
+                "total_ticks": 0,
+                "total_seconds": 0.0,
+                "snippet_ticks": trainer.curriculum.snippet_ticks,
+                "snippet_seconds": trainer.curriculum.snippet_ticks / fs,
+                "dataset_pct": {},
+            }
+
+            consecutive_nan = 0
+            prev_errors = []
+            last_good_weights = trainer.grid.weights
 
             for step in range(1, num_steps + 1):
                 if self._stop_event.is_set():
                     break
 
-                avg_error = trainer.train_step(batch_size=batch_size)
+                snippet_ticks = trainer.curriculum.snippet_ticks
+                avg_error, batch_meta = trainer.train_step(batch_size=batch_size)
+
+                if math.isnan(avg_error) or math.isinf(avg_error):
+                    consecutive_nan += 1
+                    logger.warning(
+                        "NaN at step %d (consecutive: %d) — skipping batch",
+                        step, consecutive_nan,
+                    )
+                    # Rollback to last good weights
+                    trainer.grid.weights = last_good_weights
+                    if consecutive_nan >= 3:
+                        self._error_msg = f"3 consecutive NaN batches at step {step}"
+                        break
+                    continue
+
+                consecutive_nan = 0
+                last_good_weights = trainer.grid.weights
+
+                # Check for dramatic error increase (divergence)
+                if len(prev_errors) >= 5:
+                    recent_avg = sum(prev_errors[-5:]) / 5
+                    if avg_error > recent_avg * 10:
+                        self._error_msg = (
+                            f"Error spiked at step {step}: "
+                            f"{avg_error:.6f} vs avg {recent_avg:.6f}"
+                        )
+                        break
+                prev_errors.append(avg_error)
+                if len(prev_errors) > 10:
+                    prev_errors.pop(0)
+
+                total_samples += batch_size
+                total_ticks += batch_size * snippet_ticks
+                for ds in batch_meta.get("datasets", []):
+                    dataset_counts[ds] += 1
+                dataset_pct = {
+                    ds: round(100 * n / total_samples, 1)
+                    for ds, n in dataset_counts.items()
+                }
+                active_error = batch_meta.get("active_error", 0.0)
+                col_energy = batch_meta.get("col_energy", {})
+                self._stats.update({
+                    "total_samples": total_samples,
+                    "total_ticks": total_ticks,
+                    "total_seconds": total_ticks / fs,
+                    "snippet_ticks": snippet_ticks,
+                    "snippet_seconds": snippet_ticks / fs,
+                    "dataset_pct": dataset_pct,
+                    "active_error": active_error,
+                    "col_energy": col_energy,
+                    "f1": batch_meta.get("f1", 0.0),
+                    "precision": batch_meta.get("precision", 0.0),
+                    "recall": batch_meta.get("recall", 0.0),
+                })
 
                 TrainingMetric.objects.create(
                     run=run,

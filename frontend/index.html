@@ -2,44 +2,309 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>PC Jam Grid</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCJAM</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg:         #0a0a0a;
+            --panel:      #0e0e0e;
+            --border:     #1a1a1a;
+            --border-hi:  #2a2a2a;
+            --text:       #999;
+            --text-hi:    #bbb;
+            --text-bright:#eee;
+            --accent:     #ff2200;
+            --accent-dim: #441100;
+            --green:      #00ff41;
+            --green-dim:  #003311;
+            --font:       'JetBrains Mono', monospace;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #111; color: #eee; font-family: monospace; display: flex; height: 100vh; }
-        #grid-container { flex: 1; display: flex; align-items: center; justify-content: center; }
-        canvas { image-rendering: pixelated; }
-        #sidebar { width: 280px; padding: 16px; background: #1a1a1a; overflow-y: auto; }
-        #sidebar h2 { font-size: 14px; margin-bottom: 8px; color: #888; }
-        #sidebar select, #sidebar button { width: 100%; padding: 8px; margin-bottom: 8px;
-            background: #222; color: #eee; border: 1px solid #333; font-family: monospace; }
-        #sidebar button:hover { background: #333; }
-        #status { font-size: 12px; color: #666; padding: 8px; border-top: 1px solid #333; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            font-size: 11px;
+            line-height: 1.6;
+            letter-spacing: 0.02em;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- Nav --- */
+        nav {
+            display: flex;
+            gap: 16px;
+            padding: 6px 16px;
+            background: #060606;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+        }
+        nav a { text-decoration: none; }
+        nav a.active { color: var(--accent); }
+        nav a:not(.active) { color: #666; }
+
+        /* --- Layout --- */
+        .layout {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* --- Sidebar --- */
+        .sidebar {
+            width: 280px;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .panel {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .panel-title {
+            font-size: 9px;
+            font-weight: 400;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: var(--text);
+            margin-bottom: 8px;
+        }
+
+        /* --- Config inputs --- */
+        .config-field { margin-bottom: 8px; }
+        .config-field label {
+            display: block;
+            font-size: 9px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text);
+            margin-bottom: 3px;
+        }
+        .config-input {
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text-bright);
+            font-family: var(--font);
+            font-size: 11px;
+            padding: 5px 8px;
+            border-radius: 0;
+            outline: none;
+        }
+        .config-input:focus { border-color: var(--accent-dim); }
+        select.config-input {
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23666'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            padding-right: 24px;
+            cursor: pointer;
+        }
+
+        /* --- Buttons --- */
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 8px;
+            background: transparent;
+            border: 1px solid var(--border-hi);
+            color: var(--text-hi);
+            font-family: var(--font);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            cursor: pointer;
+            border-radius: 0;
+            transition: background 0.15s, color 0.15s;
+        }
+        .btn:hover { background: var(--border); color: var(--text-bright); }
+        .btn.accent { border-color: var(--accent-dim); color: var(--accent); }
+        .btn.accent:hover { background: var(--accent-dim); color: var(--text-bright); }
+        .btn.green { border-color: var(--green-dim); color: var(--green); }
+        .btn.green:hover { background: var(--green-dim); color: var(--text-bright); }
+        .btn:disabled { opacity: 0.4; cursor: default; }
+
+        .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+        .btn-row .btn { flex: 1; }
+
+        /* --- Instrument list --- */
+        .inst-list { list-style: none; }
+        .inst-list li {
+            padding: 4px 0;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .inst-list li:hover { color: var(--text-bright); }
+        .inst-list li.selected { color: var(--accent); }
+        .inst-radio {
+            width: 8px; height: 8px;
+            border: 1px solid var(--text);
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .inst-list li.selected .inst-radio {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        /* --- Grid area --- */
+        .grid-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            min-width: 0;
+        }
+        #grid {
+            image-rendering: pixelated;
+            max-width: 100%;
+            max-height: 70vh;
+        }
+
+        /* --- Output piano roll --- */
+        #output-roll {
+            width: 100%;
+            height: 80px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            image-rendering: pixelated;
+        }
+
+        /* --- Status --- */
+        .status-line {
+            font-size: 10px;
+            color: var(--text);
+            margin-top: 4px;
+        }
+        .status-line .val { color: var(--text-bright); }
+        .status-line .accent { color: var(--accent); }
+        .status-line .green { color: var(--green); }
+
+        /* --- Slider --- */
+        input[type="range"] {
+            width: 100%;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: var(--border-hi);
+            outline: none;
+            margin: 6px 0;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px; height: 12px;
+            background: var(--text-hi);
+            border-radius: 0;
+            cursor: pointer;
+        }
+
+        /* --- File input --- */
+        input[type="file"] {
+            width: 100%;
+            font-family: var(--font);
+            font-size: 10px;
+            color: var(--text);
+        }
+        input[type="file"]::file-selector-button {
+            background: var(--bg);
+            border: 1px solid var(--border-hi);
+            color: var(--text-hi);
+            font-family: var(--font);
+            font-size: 10px;
+            padding: 4px 8px;
+            cursor: pointer;
+            margin-right: 8px;
+        }
     </style>
 </head>
 <body>
-    <div id="grid-container">
-        <canvas id="grid" width="512" height="512"></canvas>
-    </div>
-    <div id="sidebar">
-        <h2>INSTRUMENT</h2>
-        <select id="instrument-select"></select>
+    <nav>
+        <a href="design.html">Design</a>
+        <a href="dashboard.html">Training</a>
+        <a href="index.html" class="active">Jam</a>
+    </nav>
 
-        <h2>INPUT SOURCE</h2>
-        <select id="midi-input-select">
-            <option value="file">File Playback</option>
-        </select>
-        <input type="file" id="midi-file" accept=".mid,.midi" style="margin-bottom:8px;">
+    <div class="layout">
+        <div class="sidebar">
+            <!-- Model -->
+            <div class="panel">
+                <div class="panel-title">Model</div>
+                <div class="config-field">
+                    <label>Checkpoint</label>
+                    <select id="model-select" class="config-input">
+                        <option value="latest">latest</option>
+                    </select>
+                </div>
+                <div id="model-status" class="status-line">No model loaded</div>
+            </div>
 
-        <h2>CONTROLS</h2>
-        <button id="btn-play">Play</button>
-        <button id="btn-stop">Stop</button>
+            <!-- MIDI Upload -->
+            <div class="panel">
+                <div class="panel-title">MIDI Input</div>
+                <input type="file" id="midi-file" accept=".mid,.midi">
+                <div id="midi-status" class="status-line" style="margin-top:6px;"></div>
+            </div>
 
-        <div id="status">
-            <div>Tick: <span id="tick-count">0</span></div>
-            <div>Error: <span id="avg-error">-</span></div>
-            <div>Steps/frame: <span id="steps-per-frame">10</span></div>
+            <!-- Target Instrument -->
+            <div class="panel">
+                <div class="panel-title">Target Instrument</div>
+                <ul id="instrument-list" class="inst-list">
+                    <li class="status-line">Upload a MIDI file</li>
+                </ul>
+            </div>
+
+            <!-- Controls -->
+            <div class="panel">
+                <div class="panel-title">Controls</div>
+                <div class="config-field">
+                    <label>Relaxation Steps <span id="relax-val">128</span></label>
+                    <input type="range" id="relax-steps" min="1" max="256" value="128">
+                </div>
+                <div class="config-field">
+                    <label style="cursor:pointer;"><input type="checkbox" id="chk-input-audio" style="margin-right:4px;"> Play Input MIDI</label>
+                </div>
+                <div class="config-field">
+                    <label style="cursor:pointer;"><input type="checkbox" id="chk-output-audio" checked style="margin-right:4px;"> Play Output</label>
+                </div>
+                <div class="btn-row">
+                    <button id="btn-play" class="btn green" disabled>Play</button>
+                    <button id="btn-stop" class="btn accent" disabled>Stop</button>
+                </div>
+            </div>
+
+            <!-- Output -->
+            <div class="panel">
+                <div class="panel-title">Output</div>
+                <canvas id="output-roll" width="256" height="80"></canvas>
+            </div>
+
+            <!-- Status -->
+            <div class="panel">
+                <div class="panel-title">Status</div>
+                <div class="status-line">Tick: <span id="tick-count" class="val">0</span></div>
+                <div class="status-line">Total: <span id="total-ticks" class="val">0</span></div>
+                <div class="status-line">State: <span id="play-state" class="val">stopped</span></div>
+            </div>
+        </div>
+
+        <div class="grid-area">
+            <canvas id="grid" width="512" height="512"></canvas>
         </div>
     </div>
+
     <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

@@ -1,21 +1,36 @@
+import json
+import logging
+from pathlib import Path
+
+from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from training.models import TrainingRun, TrainingMetric
+from training.models import TrainingRun, TrainingMetric, NetworkLayout
 from training.services.runner import TrainingRunner
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingConfigView(APIView):
     """GET/POST training configuration."""
 
     DEFAULT_CONFIG = {
-        "grid_size": 128,
-        "relaxation_steps": 128,
+        "grid_width": 16,
+        "grid_height": 128,
+        "relaxation_steps": 64,
         "batch_size": 16,
-        "lr": 0.01,
-        "lr_weights": 0.001,
+        "lr": 0.005,
+        "lr_w": 0.001,
         "fs": 8.0,
         "curriculum_patience": 10,
+        "connectivity": "neighbor",
+        "spike_boost": 5.0,
+        "asl_gamma_neg": 4.0,
+        "asl_margin": 0.05,
+        "activation": "leaky_relu",
+        "state_momentum": 0.9,
+        "lr_amplification": 0.0,
     }
 
     def get(self, request):
@@ -75,21 +90,26 @@ class TrainingStartView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
         config = {
-            "grid_size": 128,
-            "relaxation_steps": 128,
+            "grid_width": 16,
+            "grid_height": 128,
+            "relaxation_steps": 64,
             "batch_size": 16,
             "num_steps": 1000,
             "checkpoint_every": 50,
             "fs": 8.0,
+            "connectivity": "neighbor",
         }
         config.update(request.data)
         # Ensure numeric types
-        for key in ("grid_size", "relaxation_steps", "batch_size",
+        for key in ("grid_width", "grid_height", "relaxation_steps", "batch_size",
                      "num_steps", "checkpoint_every"):
             if key in config:
                 config[key] = int(config[key])
-        if "fs" in config:
-            config["fs"] = float(config["fs"])
+        for key in ("fs", "lr", "lr_w", "alpha", "beta", "pos_weight",
+                     "lambda_sparse", "spike_boost", "asl_gamma_neg",
+                     "asl_margin", "state_momentum", "lr_amplification"):
+            if key in config:
+                config[key] = float(config[key])
 
         runner.start(config)
         return Response({"status": "started", "config": config})
@@ -135,3 +155,208 @@ class TrainingRunsListView(APIView):
                 for r in runs
             ]
         })
+
+
+class CheckpointListView(APIView):
+    """GET list of auto-saved checkpoints."""
+
+    def get(self, request):
+        ckpt_dir = Path(settings.CHECKPOINT_DIR)
+        if not ckpt_dir.exists():
+            return Response({"checkpoints": []})
+
+        checkpoints = []
+        for d in sorted(ckpt_dir.iterdir()):
+            if d.is_dir() and d.name.startswith("step_"):
+                state_file = d / "state.npy"
+                if state_file.exists():
+                    step_str = d.name.replace("step_", "")
+                    try:
+                        step = int(step_str)
+                    except ValueError:
+                        continue
+                    checkpoints.append({
+                        "name": d.name,
+                        "step": step,
+                        "timestamp": state_file.stat().st_mtime,
+                    })
+
+        return Response({"checkpoints": checkpoints})
+
+
+class ExportCheckpointView(APIView):
+    """POST to export a checkpoint as a WebGL model."""
+
+    def post(self, request):
+        checkpoint = request.data.get("checkpoint")
+        name = request.data.get("name")
+
+        if not checkpoint or not name:
+            return Response(
+                {"error": "checkpoint and name are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ckpt_path = Path(settings.CHECKPOINT_DIR) / checkpoint
+        if not ckpt_path.exists():
+            return Response(
+                {"error": f"Checkpoint {checkpoint} not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            import numpy as np
+            from training.engine.export import export_model
+            from training.engine.grid import GridState
+            import jax.numpy as jnp
+
+            state = jnp.array(np.load(ckpt_path / "state.npy"))
+            weights = jnp.array(np.load(ckpt_path / "weights.npy"))
+            params = jnp.array(np.load(ckpt_path / "params.npy"))
+
+            # Build a minimal GridState (masks not needed for export)
+            height, width = int(state.shape[0]), int(state.shape[1])
+            dummy_mask = jnp.zeros((height, width), dtype=bool)
+
+            # Load log_precision if present in checkpoint
+            lp_path = ckpt_path / "log_precision.npy"
+            if lp_path.exists():
+                log_precision = jnp.array(np.load(lp_path))
+            else:
+                log_precision = jnp.zeros((height, width))
+
+            grid = GridState(
+                state=state, weights=weights, params=params,
+                log_precision=log_precision,
+                input_mask=dummy_mask, output_mask=dummy_mask,
+                conditioning_mask=dummy_mask,
+            )
+
+            # Load vocabulary from checkpoint metadata first, fall back to latest
+            vocab = {}
+            metadata_file = ckpt_path / "metadata.json"
+            if metadata_file.exists():
+                metadata = json.loads(metadata_file.read_text())
+                vocab = metadata.get("vocabulary", {})
+            if not vocab:
+                default_model = Path(settings.BASE_DIR) / "frontend" / "model" / "config.json"
+                if default_model.exists():
+                    vocab = json.loads(default_model.read_text()).get("vocabulary", {})
+
+            export_dir = Path(settings.BASE_DIR) / "frontend" / "model" / name
+            export_model(grid, vocab, str(export_dir))
+
+            return Response({"status": "exported", "name": name})
+        except Exception as e:
+            logger.exception("Export failed")
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ModelListView(APIView):
+    """GET list of exported models available for the jam page."""
+
+    def get(self, request):
+        model_dir = Path(settings.BASE_DIR) / "frontend" / "model"
+        models = []
+
+        # Check for default model
+        default_config = model_dir / "config.json"
+        if default_config.exists():
+            try:
+                config = json.loads(default_config.read_text())
+                models.append({"name": "latest", "config": config})
+            except Exception:
+                pass
+
+        # Check subdirectories
+        if model_dir.exists():
+            for d in sorted(model_dir.iterdir()):
+                if d.is_dir() and (d / "config.json").exists():
+                    try:
+                        config = json.loads((d / "config.json").read_text())
+                        models.append({"name": d.name, "config": config})
+                    except Exception:
+                        continue
+
+        return Response({"models": models})
+
+
+class LayoutListView(APIView):
+    """GET list / POST create network layouts."""
+
+    def get(self, request):
+        layouts = NetworkLayout.objects.order_by("-updated_at")
+        return Response({
+            "layouts": [
+                {
+                    "id": l.id,
+                    "name": l.name,
+                    "created_at": l.created_at.isoformat(),
+                    "updated_at": l.updated_at.isoformat(),
+                }
+                for l in layouts
+            ]
+        })
+
+    def post(self, request):
+        name = request.data.get("name")
+        layout_json = request.data.get("layout_json", {})
+        if not name:
+            return Response(
+                {"error": "name is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        layout, created = NetworkLayout.objects.update_or_create(
+            name=name,
+            defaults={"layout_json": layout_json},
+        )
+        return Response({
+            "id": layout.id,
+            "name": layout.name,
+            "layout_json": layout.layout_json,
+            "created": created,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class LayoutDetailView(APIView):
+    """GET / PUT / DELETE a single network layout."""
+
+    def get(self, request, pk):
+        try:
+            layout = NetworkLayout.objects.get(pk=pk)
+        except NetworkLayout.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "id": layout.id,
+            "name": layout.name,
+            "layout_json": layout.layout_json,
+            "created_at": layout.created_at.isoformat(),
+            "updated_at": layout.updated_at.isoformat(),
+        })
+
+    def put(self, request, pk):
+        try:
+            layout = NetworkLayout.objects.get(pk=pk)
+        except NetworkLayout.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        if "name" in request.data:
+            layout.name = request.data["name"]
+        if "layout_json" in request.data:
+            layout.layout_json = request.data["layout_json"]
+        layout.save()
+        return Response({
+            "id": layout.id,
+            "name": layout.name,
+            "layout_json": layout.layout_json,
+        })
+
+    def delete(self, request, pk):
+        try:
+            layout = NetworkLayout.objects.get(pk=pk)
+        except NetworkLayout.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        layout.delete()
+        return Response({"status": "deleted"})
