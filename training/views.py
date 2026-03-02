@@ -256,10 +256,19 @@ class ExportCheckpointView(APIView):
 
 
 class ModelListView(APIView):
-    """GET list of exported models available for the jam page."""
+    """GET list of exported models available for the jam page.
+
+    Auto-exports the latest checkpoint as the default model if the
+    checkpoint is newer than the current export (or no export exists).
+    """
 
     def get(self, request):
         model_dir = Path(settings.BASE_DIR) / "frontend" / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-export latest checkpoint if needed
+        self._auto_export_latest(model_dir)
+
         models = []
 
         # Check for default model
@@ -272,16 +281,83 @@ class ModelListView(APIView):
                 pass
 
         # Check subdirectories
-        if model_dir.exists():
-            for d in sorted(model_dir.iterdir()):
-                if d.is_dir() and (d / "config.json").exists():
-                    try:
-                        config = json.loads((d / "config.json").read_text())
-                        models.append({"name": d.name, "config": config})
-                    except Exception:
-                        continue
+        for d in sorted(model_dir.iterdir()):
+            if d.is_dir() and (d / "config.json").exists():
+                try:
+                    config = json.loads((d / "config.json").read_text())
+                    models.append({"name": d.name, "config": config})
+                except Exception:
+                    continue
 
         return Response({"models": models})
+
+    @staticmethod
+    def _auto_export_latest(model_dir):
+        """Export the latest checkpoint as default model if it's newer."""
+        ckpt_dir = Path(settings.CHECKPOINT_DIR)
+        if not ckpt_dir.exists():
+            return
+
+        # Find the latest checkpoint by step number
+        ckpts = sorted(ckpt_dir.glob("step_*"), key=lambda p: int(p.name.split("_")[1]))
+        if not ckpts:
+            return
+        latest_ckpt = ckpts[-1]
+
+        # Check if export is up to date
+        export_config = model_dir / "config.json"
+        ckpt_state = latest_ckpt / "state.npy"
+        if not ckpt_state.exists():
+            return
+        if export_config.exists() and export_config.stat().st_mtime >= ckpt_state.stat().st_mtime:
+            return  # Export is already up to date
+
+        try:
+            import numpy as np
+            import jax.numpy as jnp
+            from training.engine.export import export_model
+            from training.engine.grid import GridState
+
+            state = jnp.array(np.load(latest_ckpt / "state.npy"))
+            weights = jnp.array(np.load(latest_ckpt / "weights.npy"))
+            params = jnp.array(np.load(latest_ckpt / "params.npy"))
+
+            height, width = int(state.shape[0]), int(state.shape[1])
+            dummy_mask = jnp.zeros((height, width), dtype=bool)
+
+            lp = jnp.zeros((height, width))
+            lp_path = latest_ckpt / "log_precision.npy"
+            if lp_path.exists():
+                lp = jnp.array(np.load(lp_path))
+
+            grid = GridState(
+                state=state, weights=weights, params=params,
+                log_precision=lp,
+                input_mask=dummy_mask, output_mask=dummy_mask,
+                conditioning_mask=dummy_mask,
+            )
+
+            # Load optional fields
+            fc_path = latest_ckpt / "fc_weights.npy"
+            if fc_path.exists():
+                grid.fc_weights = jnp.array(np.load(fc_path))
+            wt_path = latest_ckpt / "w_temporal.npy"
+            if wt_path.exists():
+                grid.w_temporal = jnp.array(np.load(wt_path))
+
+            metadata_file = latest_ckpt / "metadata.json"
+            vocab = {}
+            if metadata_file.exists():
+                vocab = json.loads(metadata_file.read_text()).get("vocabulary", {})
+                connectivity = json.loads(metadata_file.read_text()).get("connectivity", "neighbor")
+                grid.connectivity = connectivity
+            if not vocab and export_config.exists():
+                vocab = json.loads(export_config.read_text()).get("vocabulary", {})
+
+            export_model(grid, vocab, str(model_dir))
+            logger.info("Auto-exported checkpoint %s as default model", latest_ckpt.name)
+        except Exception:
+            logger.exception("Auto-export of latest checkpoint failed")
 
 
 class LayoutListView(APIView):

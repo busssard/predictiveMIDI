@@ -1,4 +1,6 @@
+import atexit
 import math
+import signal
 import threading
 import time
 import logging
@@ -12,6 +14,36 @@ from training.engine.export import export_model
 from training.models import TrainingRun, TrainingMetric
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_jax():
+    """Release JAX GPU resources on process exit."""
+    try:
+        import jax
+        jax.clear_caches()
+        # Block until all pending GPU work completes
+        for dev in jax.devices():
+            dev.synchronize()
+    except Exception:
+        pass
+
+atexit.register(_cleanup_jax)
+
+
+def _shutdown_handler(signum, frame):
+    """Stop training gracefully on SIGINT/SIGTERM, then re-raise."""
+    runner = TrainingRunner._instance
+    if runner and runner.is_running:
+        logger.info("Signal %d received — stopping training...", signum)
+        runner.stop(wait=True, timeout=5)
+    # Re-raise so Django/Python handles shutdown normally
+    signal.default_int_handler(signum, frame)
+
+
+# Only register in main thread (Django autoreloader spawns threads)
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
 
 
 class TrainingRunner:
@@ -35,7 +67,19 @@ class TrainingRunner:
                     obj._error_msg = None
                     obj._stats = {}
                     cls._instance = obj
+                    # Mark any orphaned "running" entries from previous server sessions
+                    obj._cleanup_stale_runs()
         return cls._instance
+
+    @staticmethod
+    def _cleanup_stale_runs():
+        try:
+            stale = TrainingRun.objects.filter(status="running")
+            count = stale.update(status="stopped")
+            if count:
+                logger.info("Marked %d stale training run(s) as stopped", count)
+        except Exception:
+            pass  # DB might not be ready yet
 
     @property
     def is_running(self):
@@ -62,8 +106,10 @@ class TrainingRunner:
         )
         self._thread.start()
 
-    def stop(self):
+    def stop(self, wait=False, timeout=10):
         self._stop_event.set()
+        if wait and self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def _train_loop(self, config):
         run = None
@@ -170,7 +216,9 @@ class TrainingRunner:
                     break
 
                 snippet_ticks = trainer.curriculum.snippet_ticks
+                step_t0 = time.time()
                 avg_error, batch_meta = trainer.train_step(batch_size=batch_size)
+                step_dt = time.time() - step_t0
 
                 if math.isnan(avg_error) or math.isinf(avg_error):
                     consecutive_nan += 1
@@ -212,6 +260,9 @@ class TrainingRunner:
                 active_error = batch_meta.get("active_error", 0.0)
                 col_energy = batch_meta.get("col_energy", {})
                 self._stats.update({
+                    "step": step,
+                    "num_steps": num_steps,
+                    "step_time": round(step_dt, 2),
                     "total_samples": total_samples,
                     "total_ticks": total_ticks,
                     "total_seconds": total_ticks / fs,
