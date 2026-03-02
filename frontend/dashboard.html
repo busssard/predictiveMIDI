@@ -175,6 +175,9 @@
             cursor: pointer;
         }
 
+        .manual-grid-fields { display: contents; }
+        .manual-grid-fields.hidden { display: none; }
+
         /* --- Train Button --- */
         .btn-train {
             display: block;
@@ -283,6 +286,13 @@
         <div class="panel">
             <div class="panel-title">Training Config</div>
             <div class="config-grid">
+                <div class="config-field" style="grid-column:1/-1;">
+                    <label>Layout</label>
+                    <select id="cfg-layout" class="config-input">
+                        <option value="">— manual config —</option>
+                    </select>
+                </div>
+                <div id="manual-grid-fields" class="manual-grid-fields">
                 <div class="config-field">
                     <label>Grid Width</label>
                     <input id="cfg-grid-width" class="config-input" type="number" value="16">
@@ -291,6 +301,16 @@
                     <label>Grid Height</label>
                     <input id="cfg-grid-height" class="config-input" type="number" value="128">
                 </div>
+                <div class="config-field">
+                    <label>Connectivity</label>
+                    <select id="cfg-connectivity" class="config-input">
+                        <option value="neighbor" selected>neighbor</option>
+                        <option value="fc">fc</option>
+                        <option value="fc_double">fc_double</option>
+                    </select>
+                </div>
+                </div>
+                <div id="layout-summary" style="grid-column:1/-1;display:none;color:var(--text-hi);font-size:10px;padding:4px 0;"></div>
                 <div class="config-field">
                     <label>Relaxation Steps</label>
                     <input id="cfg-relax" class="config-input" type="number" value="64">
@@ -319,14 +339,6 @@
                         <option value="relu">relu</option>
                         <option value="leaky_relu" selected>leaky_relu</option>
                         <option value="linear">linear</option>
-                    </select>
-                </div>
-                <div class="config-field">
-                    <label>Connectivity</label>
-                    <select id="cfg-connectivity" class="config-input">
-                        <option value="neighbor" selected>neighbor</option>
-                        <option value="fc">fc</option>
-                        <option value="fc_double">fc_double</option>
                     </select>
                 </div>
                 <div class="config-field">
@@ -368,8 +380,11 @@
             </div>
             <button id="btn-train" class="btn-train">START TRAINING</button>
             <div id="status-error"></div>
-            <div id="train-stats" style="margin-top:8px; font-size:10px;">
-                <div>Active error: <span id="stat-active-error" style="color:var(--text-hi);">-</span></div>
+            <div id="train-stats" style="margin-top:8px; font-size:10px; line-height:1.8;">
+                <div>Step: <span id="stat-step" class="val">-</span> | <span id="stat-step-time" style="color:var(--text);">-</span></div>
+                <div>Error: <span id="stat-error" class="val">-</span> | Active: <span id="stat-active-error" class="val">-</span></div>
+                <div>F1: <span id="stat-f1" class="val">-</span> | P: <span id="stat-prec" class="val">-</span> R: <span id="stat-recall" class="val">-</span></div>
+                <div>Phase: <span id="stat-phase" class="val">-</span></div>
             </div>
         </div>
 

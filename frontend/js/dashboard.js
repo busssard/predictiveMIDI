@@ -38,6 +38,9 @@ const $$ = s => document.querySelectorAll(s);
 let isRunning = false;
 let selectedRunId = null;
 let chart = null;
+let selectedLayoutId = null;
+let selectedLayoutData = null;
+let pollTimer = null;
 
 // --- Init ---
 async function init() {
@@ -49,11 +52,13 @@ async function init() {
     });
 
     $('#btn-train').addEventListener('click', handleTrainButton);
+    $('#cfg-layout').addEventListener('change', handleLayoutChange);
 
     await Promise.all([
         loadCorpus(),
         loadRuns(),
         checkStatus(),
+        loadLayouts(),
     ]);
 }
 
@@ -102,6 +107,7 @@ function updateStatusUI(st) {
         btn.textContent = 'STOP';
         btn.className = 'btn-train running';
         setConfigDisabled(true);
+        startPolling();
     } else {
         dot.className = 'dot idle';
         label.textContent = 'IDLE';
@@ -109,6 +115,7 @@ function updateStatusUI(st) {
         btn.textContent = 'START TRAINING';
         btn.className = 'btn-train';
         setConfigDisabled(false);
+        stopPolling();
     }
 
     if (st.error) {
@@ -118,10 +125,52 @@ function updateStatusUI(st) {
         $('#status-error').style.display = 'none';
     }
 
+    // Training progress stats
+    if (st.step != null) {
+        $('#stat-step').textContent = `${st.step}/${st.num_steps || '?'}`;
+    }
+    if (st.step_time != null) {
+        $('#stat-step-time').textContent = `${st.step_time}s/step`;
+    }
+    if (st.latest_error != null) {
+        $('#stat-error').textContent = st.latest_error.toFixed(6);
+    } else if (st.run_id != null) {
+        // Try to show from run data
+    }
     if (st.active_error != null) {
         $('#stat-active-error').textContent = st.active_error.toFixed(6);
     } else {
         $('#stat-active-error').textContent = '-';
+    }
+    if (st.f1 != null) {
+        $('#stat-f1').textContent = st.f1.toFixed(3);
+        $('#stat-prec').textContent = (st.precision || 0).toFixed(3);
+        $('#stat-recall').textContent = (st.recall || 0).toFixed(3);
+    }
+    if (st.current_phase != null) {
+        $('#stat-phase').textContent = st.current_phase;
+    }
+}
+
+function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(async () => {
+        try {
+            const st = await API.status();
+            isRunning = st.running;
+            updateStatusUI(st);
+            if (!st.running) {
+                stopPolling();
+                await loadRuns();
+            }
+        } catch { /* ignore */ }
+    }, 3000);
+}
+
+function stopPolling() {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
     }
 }
 
@@ -156,16 +205,13 @@ async function handleTrainButton() {
 }
 
 function readConfig() {
-    return {
-        grid_width:       parseInt($('#cfg-grid-width').value),
-        grid_height:      parseInt($('#cfg-grid-height').value),
+    const cfg = {
         relaxation_steps: parseInt($('#cfg-relax').value),
         batch_size:       parseInt($('#cfg-batch').value),
         num_steps:        parseInt($('#cfg-steps').value),
         checkpoint_every: parseInt($('#cfg-checkpoint').value),
         fs:               parseFloat($('#cfg-fs').value),
         activation:       $('#cfg-activation').value,
-        connectivity:     $('#cfg-connectivity').value,
         lr:               parseFloat($('#cfg-lr').value),
         lr_w:             parseFloat($('#cfg-lr-w').value),
         pos_weight:       parseFloat($('#cfg-pos-weight').value),
@@ -176,6 +222,70 @@ function readConfig() {
         asl_margin:       parseFloat($('#cfg-asl-margin').value),
         lr_amplification: parseFloat($('#cfg-lr-amplification').value),
     };
+
+    if (selectedLayoutId && selectedLayoutData) {
+        cfg.layout_id = selectedLayoutId;
+        cfg.layout_json = selectedLayoutData;
+    } else {
+        cfg.grid_width = parseInt($('#cfg-grid-width').value);
+        cfg.grid_height = parseInt($('#cfg-grid-height').value);
+        cfg.connectivity = $('#cfg-connectivity').value;
+    }
+
+    return cfg;
+}
+
+// --- Layouts ---
+async function loadLayouts() {
+    try {
+        const data = await API.get('/training/layouts/');
+        const sel = $('#cfg-layout');
+        // Keep the manual option
+        sel.innerHTML = '<option value="">-- manual config --</option>';
+        for (const l of (data.layouts || [])) {
+            const opt = document.createElement('option');
+            opt.value = l.id;
+            opt.textContent = l.name;
+            sel.appendChild(opt);
+        }
+    } catch {
+        // No layouts available, that's fine
+    }
+}
+
+async function handleLayoutChange() {
+    const id = $('#cfg-layout').value;
+    const manualFields = $('#manual-grid-fields');
+    const summary = $('#layout-summary');
+    if (!id) {
+        selectedLayoutId = null;
+        selectedLayoutData = null;
+        manualFields.classList.remove('hidden');
+        summary.style.display = 'none';
+        return;
+    }
+    try {
+        const data = await API.get(`/training/layouts/${id}/`);
+        selectedLayoutId = data.id;
+        selectedLayoutData = data.layout_json;
+        manualFields.classList.add('hidden');
+        summary.style.display = '';
+        // Summarize the layout
+        const blocks = selectedLayoutData.blocks || [];
+        const conns = selectedLayoutData.connections || [];
+        const parts = blocks.map(b => {
+            const h = (b.heights || []).join('\u2192');
+            return `${b.name || b.role} [${b.columns}col, ${h}${b.connectivity ? ', ' + b.connectivity : ''}]`;
+        });
+        summary.innerHTML = parts.join(' \u2014 ') +
+            `<br>${conns.length} connection${conns.length !== 1 ? 's' : ''}`;
+    } catch (e) {
+        console.error('Failed to load layout:', e);
+        selectedLayoutId = null;
+        selectedLayoutData = null;
+        manualFields.classList.remove('hidden');
+        summary.style.display = 'none';
+    }
 }
 
 // --- Runs ---
