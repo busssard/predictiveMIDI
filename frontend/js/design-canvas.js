@@ -57,6 +57,7 @@ export class DesignCanvas {
         this._panStart = null;
         this._hovered = null;
         this._selected = null;
+        this._selectedConn = null;
         this._cornerDrag = null; // {block, cornerIdx, startY, startH}
         this._connectFrom = null; // {block, edge}
         this._connectPreview = null; // {x, y}
@@ -71,6 +72,7 @@ export class DesignCanvas {
         this.onBlockDelete = null;
         this.onConnectionAdd = null;
         this.onConnectionDelete = null;
+        this.onConnectionSelect = null;
         this.onCornerResize = null;
         this.onChange = null;
 
@@ -173,15 +175,28 @@ export class DesignCanvas {
         const block = this._hitTestBlock(wx, wy);
         if (block) {
             this._selected = block;
+            this._selectedConn = null;
             this._dragging = {
                 block,
                 offsetX: wx - block.x,
                 offsetY: wy - block.y,
             };
             if (this.onBlockSelect) this.onBlockSelect(block);
+            if (this.onConnectionSelect) this.onConnectionSelect(null);
         } else {
-            this._selected = null;
-            if (this.onBlockSelect) this.onBlockSelect(null);
+            // Check if clicking a connection
+            const conn = this._hitTestConnection(wx, wy);
+            if (conn) {
+                this._selectedConn = conn;
+                this._selected = null;
+                if (this.onBlockSelect) this.onBlockSelect(null);
+                if (this.onConnectionSelect) this.onConnectionSelect(conn);
+            } else {
+                this._selected = null;
+                this._selectedConn = null;
+                if (this.onBlockSelect) this.onBlockSelect(null);
+                if (this.onConnectionSelect) this.onConnectionSelect(null);
+            }
         }
     }
 
@@ -256,10 +271,18 @@ export class DesignCanvas {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' ||
             e.target.tagName === 'TEXTAREA') return;
 
-        if ((e.key === 'Delete' || e.key === 'Backspace') && this._selected) {
-            if (this.onBlockDelete) this.onBlockDelete(this._selected);
-            this._selected = null;
-            e.preventDefault();
+        if ((e.key === 'Delete' || e.key === 'Backspace')) {
+            if (this._selectedConn) {
+                if (this.onConnectionDelete) this.onConnectionDelete(this._selectedConn);
+                this._selectedConn = null;
+                e.preventDefault();
+                return;
+            }
+            if (this._selected) {
+                if (this.onBlockDelete) this.onBlockDelete(this._selected);
+                this._selected = null;
+                e.preventDefault();
+            }
         }
         if (e.key === '+' || e.key === '=') {
             this.camera.zoom = Math.min(20, this.camera.zoom * 1.2);
@@ -321,20 +344,29 @@ export class DesignCanvas {
             if (!from || !to) continue;
             const p1 = from.getEdgePosition(conn.from_edge);
             const p2 = to.getEdgePosition(conn.to_edge);
-            // Distance to line segment
-            const d = this._pointToSegDist(wx, wy, p1.x, p1.y, p2.x, p2.y);
+            const mx = (p1.x + p2.x) / 2;
+            const my = (p1.y + p2.y) / 2;
+            const dx = p2.x - p1.x;
+            const cpx = mx;
+            const cpy = my - Math.abs(dx) * 0.2;
+            const d = this._pointToBezierDist(wx, wy, p1.x, p1.y, cpx, cpy, p2.x, p2.y);
             if (d < thresh) return conn;
         }
         return null;
     }
 
-    _pointToSegDist(px, py, x1, y1, x2, y2) {
-        const dx = x2 - x1, dy = y2 - y1;
-        const len2 = dx * dx + dy * dy;
-        if (len2 === 0) return Math.hypot(px - x1, py - y1);
-        let t = ((px - x1) * dx + (py - y1) * dy) / len2;
-        t = Math.max(0, Math.min(1, t));
-        return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+    _pointToBezierDist(px, py, x0, y0, cx, cy, x1, y1) {
+        let minD = Infinity;
+        const steps = 20;
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const u = 1 - t;
+            const bx = u * u * x0 + 2 * u * t * cx + t * t * x1;
+            const by = u * u * y0 + 2 * u * t * cy + t * t * y1;
+            const d = Math.hypot(px - bx, py - by);
+            if (d < minD) minD = d;
+        }
+        return minD;
     }
 
     _getBlockById(id) {
@@ -521,6 +553,7 @@ export class DesignCanvas {
 
         const p1 = from.getEdgePosition(conn.from_edge);
         const p2 = to.getEdgePosition(conn.to_edge);
+        const isSelected = conn === this._selectedConn;
 
         // Quadratic bezier control point
         const mx = (p1.x + p2.x) / 2;
@@ -532,9 +565,17 @@ export class DesignCanvas {
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.quadraticCurveTo(cpx, cpy, p2.x, p2.y);
-        ctx.strokeStyle = CONN_COLORS[conn.type] || '#555';
-        ctx.lineWidth = 2 / this.camera.zoom;
+        ctx.strokeStyle = isSelected ? '#fff' : (CONN_COLORS[conn.type] || '#555');
+        ctx.lineWidth = (isSelected ? 3 : 2) / this.camera.zoom;
         ctx.stroke();
+
+        // Type label on selected connection
+        if (isSelected) {
+            ctx.fillStyle = '#fff';
+            ctx.font = `bold ${10 / this.camera.zoom}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.fillText(conn.type, cpx, cpy - 6 / this.camera.zoom);
+        }
 
         // Arrow head
         const angle = Math.atan2(p2.y - cpy, p2.x - cpx);
@@ -546,7 +587,7 @@ export class DesignCanvas {
         ctx.lineTo(p2.x - aLen * Math.cos(angle + 0.3),
                    p2.y - aLen * Math.sin(angle + 0.3));
         ctx.closePath();
-        ctx.fillStyle = CONN_COLORS[conn.type] || '#555';
+        ctx.fillStyle = isSelected ? '#fff' : (CONN_COLORS[conn.type] || '#555');
         ctx.fill();
     }
 

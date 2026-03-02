@@ -39,6 +39,7 @@ let currentLayout = null;
 let currentLayoutId = null;
 let canvas = null;
 let selectedBlock = null;
+let selectedConn = null;
 let undoStack = [];
 let redoStack = [];
 let autoSaveTimer = null;
@@ -52,6 +53,7 @@ async function init() {
     // Canvas callbacks
     canvas.onBlockSelect = block => {
         selectedBlock = block;
+        selectedConn = null;
         updatePropsPanel();
     };
     canvas.onBlockAdd = (x, y) => addBlock(x, y);
@@ -60,6 +62,10 @@ async function init() {
         addConnection(fromBlock, fromEdge, toBlock, toEdge);
     };
     canvas.onConnectionDelete = conn => deleteConnection(conn);
+    canvas.onConnectionSelect = conn => {
+        selectedConn = conn;
+        updatePropsPanel();
+    };
     canvas.onChange = () => scheduleAutoSave();
 
     // Tool buttons
@@ -77,6 +83,14 @@ async function init() {
     $('#btn-import').addEventListener('click', () => $('#import-file').click());
     $('#import-file').addEventListener('change', importJSON);
     $('#btn-new-layout').addEventListener('click', newLayout);
+
+    // Layout name input
+    $('#layout-name').addEventListener('change', () => {
+        if (currentLayout) {
+            currentLayout.name = $('#layout-name').value || 'untitled';
+            scheduleAutoSave();
+        }
+    });
 
     // Property panel inputs
     setupPropsListeners();
@@ -135,6 +149,7 @@ function createDefaultLayout() {
         output_blocks: [],
     };
     resetBlockIdCounter();
+    $('#layout-name').value = 'untitled';
 
     // Create a default encoder-decoder pair
     const encoder = new BlockModel({
@@ -174,6 +189,7 @@ function loadLayoutData(data) {
     resetBlockIdCounter();
     syncToCanvas();
     updateLayoutSelector();
+    $('#layout-name').value = currentLayout.name || '';
 }
 
 function syncToCanvas() {
@@ -277,23 +293,42 @@ function deleteConnection(conn) {
 
 function updatePropsPanel() {
     const panel = $('#props-panel');
-    if (!selectedBlock) {
+    const connProps = $('#conn-props');
+    const blockProps = $('#block-props');
+
+    if (!selectedBlock && !selectedConn) {
         panel.classList.add('hidden');
         return;
     }
     panel.classList.remove('hidden');
 
-    $('#prop-name').value = selectedBlock.name;
-    $('#prop-columns').value = selectedBlock.columns;
-    $('#prop-heights').value = selectedBlock.heights.join(', ');
-    $('#prop-connectivity').value = selectedBlock.connectivity;
-    $('#prop-algorithm').value = selectedBlock.algorithm;
-    $('#prop-role').value = selectedBlock.role;
-    $('#prop-input-edge').value = selectedBlock.input_edge;
-    $('#prop-output-edge').value = selectedBlock.output_edge;
+    if (selectedConn) {
+        connProps.style.display = '';
+        blockProps.style.display = 'none';
+        $('#conn-type').value = selectedConn.type || 'neighbor';
+    } else {
+        connProps.style.display = 'none';
+        blockProps.style.display = '';
+        $('#prop-name').value = selectedBlock.name;
+        $('#prop-columns').value = selectedBlock.columns;
+        $('#prop-heights').value = selectedBlock.heights.join(', ');
+        $('#prop-connectivity').value = selectedBlock.connectivity;
+        $('#prop-algorithm').value = selectedBlock.algorithm;
+        $('#prop-role').value = selectedBlock.role;
+        $('#prop-input-edge').value = selectedBlock.input_edge;
+        $('#prop-output-edge').value = selectedBlock.output_edge;
+    }
 }
 
 function setupPropsListeners() {
+    // Connection type
+    $('#conn-type').addEventListener('change', () => {
+        if (!selectedConn) return;
+        pushUndo();
+        selectedConn.type = $('#conn-type').value;
+        scheduleAutoSave();
+    });
+
     const update = (id, field, parse) => {
         $(id).addEventListener('change', () => {
             if (!selectedBlock) return;

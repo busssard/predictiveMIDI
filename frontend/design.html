@@ -266,6 +266,19 @@
             <canvas id="design-canvas"></canvas>
         </div>
         <div id="props-panel" class="hidden">
+            <div id="conn-props" style="display:none;">
+                <div class="props-title">Connection</div>
+                <div class="prop-field">
+                    <label>Type</label>
+                    <select id="conn-type" class="prop-input">
+                        <option value="neighbor">neighbor</option>
+                        <option value="fc">fc</option>
+                        <option value="fc_double">fc_double</option>
+                    </select>
+                </div>
+                <hr style="border:none;border-top:1px solid var(--border);margin:10px 0;">
+            </div>
+            <div id="block-props">
             <div class="props-title">Block Properties</div>
             <div class="prop-field">
                 <label>Name</label>
@@ -322,11 +335,13 @@
                     <option value="bottom">bottom</option>
                 </select>
             </div>
+            </div>
         </div>
     </div>
 
     <div class="bottom-bar">
         <select id="layout-select"></select>
+        <input id="layout-name" class="prop-input" type="text" placeholder="layout name" style="width:160px;font-size:10px;padding:3px 6px;">
         <button id="btn-new-layout" class="action-btn">+ New</button>
     </div>
 
