@@ -25,3 +25,9 @@ skills-lock.json
 
 # JS
 node_modules/
+
+# Large unsplit index (use split files instead)
+data/corpus_index.json
+
+# Reference papers (too large for git)
+docs/papers/
