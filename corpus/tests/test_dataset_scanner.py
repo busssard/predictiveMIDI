@@ -270,7 +270,7 @@ class TestBatchGeneratorMultiSource:
                 ("Bass", 32, False, BASS_NOTES),
             ],
         )
-        gen = BatchGenerator(str(tmp_path), snippet_ticks=16, fs=8.0)
+        gen = BatchGenerator(str(tmp_path), snippet_ticks=16, fs=8.0, test_fraction=0)
         batch = gen.generate_batch(batch_size=1)
         assert batch["input"].shape == (1, 16, 128)
 
@@ -311,7 +311,7 @@ class TestBatchGeneratorMultiSource:
 
         gen = BatchGenerator(
             str(tmp_path), snippet_ticks=16, fs=8.0,
-            scan_results=scan_results, rng_seed=42,
+            scan_results=scan_results, rng_seed=42, test_fraction=0,
         )
         batch = gen.generate_batch(batch_size=2)
         assert batch["input"].shape == (2, 16, 128)

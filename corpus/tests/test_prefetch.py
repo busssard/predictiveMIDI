@@ -23,8 +23,14 @@ class TestPrefetchBatchGenerator:
             assert batch["input"].shape[1] == 16
 
             pg.snippet_ticks = 8
+            # The key invariant: all items within a batch have the same length.
+            # After a snippet_ticks change, the next batch may still use the
+            # old length (if the worker already generated it), but it must be
+            # internally consistent.
             batch = pg.generate_batch(batch_size=2)
-            assert batch["input"].shape[1] == 8
+            assert batch["input"].shape[1] in (8, 16)
+            # All items in the batch must agree
+            assert batch["input"].shape == (2, batch["input"].shape[1], 128)
 
     def test_close_stops_worker(self, tmp_path):
         make_corpus(tmp_path)

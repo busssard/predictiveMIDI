@@ -102,6 +102,7 @@ class TestBatchGeneratorFromIndex:
         gen = BatchGenerator(
             midi_dir=str(tmp_path / "midi"),
             index_path=str(index_path),
+            test_fraction=0,
         )
         assert len(gen.song_paths) == 3
         assert len(gen.vocabulary) > 0
@@ -140,6 +141,7 @@ class TestBatchGeneratorFromIndex:
             midi_dir=str(tmp_path / "midi"),
             scan_results=one_song,
             index_path=str(index_path),
+            test_fraction=0,
         )
         # scan_results has 1 song, index has 2 — scan_results should win
         assert len(gen.song_paths) == 1

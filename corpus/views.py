@@ -1,13 +1,19 @@
 import json
+import logging
 from pathlib import Path
 
+import numpy as np
+import pretty_midi
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser
 from rest_framework import status
 from corpus.services.scanner import scan_directory
-from corpus.services.vocabulary import build_vocabulary
+from corpus.services.vocabulary import build_vocabulary, categorize_instrument
 from corpus.models import CorpusScan, Song
+
+logger = logging.getLogger(__name__)
 
 
 class CorpusScanView(APIView):
@@ -66,14 +72,19 @@ class CorpusStatsView(APIView):
     """GET corpus statistics from the index file."""
 
     def get(self, request):
+        from corpus.services.batch_generator import BatchGenerator
         index_path = Path(settings.BASE_DIR) / "data" / "corpus_index.json"
-        if not index_path.exists():
+        split_parts = sorted(index_path.parent.glob("corpus_index_*.json"))
+        if index_path.exists():
+            with open(index_path) as f:
+                index_data = json.load(f)
+        elif split_parts:
+            index_data = BatchGenerator._load_index(str(split_parts[0]))
+        else:
             return Response(
                 {"error": "No corpus index found. Run: python manage.py build_corpus_index"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        with open(index_path) as f:
-            index_data = json.load(f)
 
         by_dataset = {}
         for song in index_data.get("songs", []):
@@ -85,4 +96,44 @@ class CorpusStatsView(APIView):
             "by_dataset": by_dataset,
             "vocabulary": index_data.get("vocabulary", {}),
             "num_instruments": len(index_data.get("vocabulary", {})),
+        })
+
+
+class MidiToRollView(APIView):
+    """POST a MIDI file, get per-instrument piano rolls as JSON."""
+
+    parser_classes = [MultiPartParser]
+
+    def post(self, request):
+        midi_file = request.FILES.get("file")
+        if not midi_file:
+            return Response({"error": "No file uploaded"}, status=status.HTTP_400_BAD_REQUEST)
+
+        fs = float(request.data.get("fs", 8.0))
+
+        try:
+            midi = pretty_midi.PrettyMIDI(midi_file)
+        except Exception as e:
+            logger.warning("Failed to parse MIDI: %s", e)
+            return Response({"error": f"Invalid MIDI file: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        instruments = []
+        max_ticks = 0
+        for inst in midi.instruments:
+            roll = inst.get_piano_roll(fs=fs) / 127.0  # (128, T)
+            ticks = roll.shape[1]
+            max_ticks = max(max_ticks, ticks)
+            cat = categorize_instrument(inst.program, inst.is_drum)
+            instruments.append({
+                "name": inst.name or cat,
+                "category": cat,
+                "program": inst.program,
+                "is_drum": inst.is_drum,
+                "roll": roll[:128, :].T.tolist(),  # (T, 128)
+            })
+
+        return Response({
+            "instruments": instruments,
+            "total_ticks": max_ticks,
+            "fs": fs,
         })
