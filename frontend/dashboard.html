@@ -396,6 +396,20 @@
             </div>
         </div>
 
+        <!-- Checkpoints -->
+        <div class="panel full">
+            <div class="panel-title">Checkpoints</div>
+            <div id="checkpoint-list" style="margin-bottom:8px;">loading...</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <select id="ckpt-select" class="config-input" style="width:auto;flex:1;">
+                    <option value="">— select checkpoint —</option>
+                </select>
+                <input id="ckpt-name" class="config-input" type="text" placeholder="export name" style="width:120px;">
+                <button id="btn-export" class="btn-train" style="width:auto;margin:0;padding:6px 16px;">EXPORT</button>
+            </div>
+            <div id="export-status" style="margin-top:6px;font-size:10px;display:none;"></div>
+        </div>
+
         <!-- Runs -->
         <div class="panel full">
             <div class="panel-title">Runs</div>

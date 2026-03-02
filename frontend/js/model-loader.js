@@ -5,7 +5,8 @@
  * in the given base URL.
  */
 export async function loadModel(gl, baseUrl) {
-    const configResp = await fetch(`${baseUrl}/config.json`);
+    const bust = '?v=' + Date.now();
+    const configResp = await fetch(`${baseUrl}/config.json` + bust);
     const config = await configResp.json();
 
     // Support both new (grid_width/grid_height) and old (grid_size) configs
@@ -15,9 +16,9 @@ export async function loadModel(gl, baseUrl) {
     config.grid_height = height;
 
     const [stateData, weightsData, paramsData] = await Promise.all([
-        fetch(`${baseUrl}/state.bin`).then(r => r.arrayBuffer()),
-        fetch(`${baseUrl}/weights.bin`).then(r => r.arrayBuffer()),
-        fetch(`${baseUrl}/params.bin`).then(r => r.arrayBuffer()),
+        fetch(`${baseUrl}/state.bin` + bust).then(r => r.arrayBuffer()),
+        fetch(`${baseUrl}/weights.bin` + bust).then(r => r.arrayBuffer()),
+        fetch(`${baseUrl}/params.bin` + bust).then(r => r.arrayBuffer()),
     ]);
 
     const stateArray = new Float32Array(stateData);

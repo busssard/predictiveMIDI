@@ -22,6 +22,8 @@ const API = {
     metrics: (id)  => API.get('/training/metrics/?run_id=' + id),
     start:  (cfg)  => API.post('/training/start/', cfg),
     stop:   ()     => API.post('/training/stop/'),
+    checkpoints: () => API.get('/training/checkpoints/'),
+    exportCkpt: (checkpoint, name) => API.post('/training/export-checkpoint/', { checkpoint, name }),
 };
 
 // --- Field docs ---
@@ -53,12 +55,14 @@ async function init() {
 
     $('#btn-train').addEventListener('click', handleTrainButton);
     $('#cfg-layout').addEventListener('change', handleLayoutChange);
+    $('#btn-export').addEventListener('click', handleExport);
 
     await Promise.all([
         loadCorpus(),
         loadRuns(),
         checkStatus(),
         loadLayouts(),
+        loadCheckpoints(),
     ]);
 }
 
@@ -159,11 +163,12 @@ function startPolling() {
             const st = await API.status();
             isRunning = st.running;
             updateStatusUI(st);
-            // Update chart and runs table with latest data
+            // Update chart, runs table, and checkpoints with latest data
             if (st.run_id) {
                 await loadRunMetrics(st.run_id);
             }
             await loadRuns();
+            await loadCheckpoints();
             if (!st.running) {
                 stopPolling();
             }
@@ -339,6 +344,59 @@ async function loadRunMetrics(runId) {
     } catch {
         chart.draw([]);
         $('#chart-title').textContent = 'LOSS';
+    }
+}
+
+// --- Checkpoints ---
+async function loadCheckpoints() {
+    try {
+        const data = await API.checkpoints();
+        const ckpts = data.checkpoints || [];
+        const sel = $('#ckpt-select');
+        sel.innerHTML = '<option value="">— select checkpoint —</option>';
+        for (const c of ckpts) {
+            const opt = document.createElement('option');
+            opt.value = c.name;
+            opt.textContent = `${c.name} (step ${c.step})`;
+            sel.appendChild(opt);
+        }
+        $('#checkpoint-list').textContent = `${ckpts.length} checkpoint${ckpts.length !== 1 ? 's' : ''} available`;
+    } catch {
+        $('#checkpoint-list').textContent = 'no checkpoints';
+    }
+}
+
+async function handleExport() {
+    const checkpoint = $('#ckpt-select').value;
+    const name = $('#ckpt-name').value.trim();
+    const statusEl = $('#export-status');
+    if (!checkpoint) {
+        statusEl.textContent = 'Select a checkpoint first';
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--accent)';
+        return;
+    }
+    if (!name) {
+        statusEl.textContent = 'Enter an export name';
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--accent)';
+        return;
+    }
+    statusEl.textContent = 'Exporting...';
+    statusEl.style.display = 'block';
+    statusEl.style.color = 'var(--text)';
+    try {
+        const result = await API.exportCkpt(checkpoint, name);
+        if (result.error) {
+            statusEl.textContent = result.error;
+            statusEl.style.color = 'var(--accent)';
+        } else {
+            statusEl.textContent = `Exported as "${name}"`;
+            statusEl.style.color = 'var(--green)';
+        }
+    } catch (e) {
+        statusEl.textContent = 'Export failed: ' + e.message;
+        statusEl.style.color = 'var(--accent)';
     }
 }
 
