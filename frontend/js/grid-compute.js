@@ -17,19 +17,23 @@ export class GridCompute {
         this.u_weights = gl.getUniformLocation(this.program, 'u_weights');
         this.u_params = gl.getUniformLocation(this.program, 'u_params');
         this.u_resolution = gl.getUniformLocation(this.program, 'u_resolution');
+        this.u_clamp_tex = gl.getUniformLocation(this.program, 'u_clamp_tex');
+        this.u_do_clamp = gl.getUniformLocation(this.program, 'u_do_clamp');
     }
 
     /**
      * Run one relaxation step: read from stateTextures[srcIdx],
      * write to stateFramebuffers[dstIdx].
+     *
+     * @param {WebGLTexture|null} clampTexture - 1×H float texture for column-0 clamping
      */
     step(stateTextures, stateFramebuffers, weightsTexture, paramsTexture,
-         srcIdx, dstIdx, gridSize) {
+         srcIdx, dstIdx, gridWidth, gridHeight, clampTexture = null) {
         const gl = this.gl;
 
         gl.useProgram(this.program);
         gl.bindFramebuffer(gl.FRAMEBUFFER, stateFramebuffers[dstIdx]);
-        gl.viewport(0, 0, gridSize, gridSize);
+        gl.viewport(0, 0, gridWidth, gridHeight);
 
         // Bind textures
         gl.activeTexture(gl.TEXTURE0);
@@ -44,7 +48,18 @@ export class GridCompute {
         gl.bindTexture(gl.TEXTURE_2D, paramsTexture);
         gl.uniform1i(this.u_params, 2);
 
-        gl.uniform2f(this.u_resolution, gridSize, gridSize);
+        // Clamp texture on unit 3
+        gl.activeTexture(gl.TEXTURE3);
+        if (clampTexture) {
+            gl.bindTexture(gl.TEXTURE_2D, clampTexture);
+            gl.uniform1i(this.u_clamp_tex, 3);
+            gl.uniform1f(this.u_do_clamp, 1.0);
+        } else {
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.uniform1f(this.u_do_clamp, 0.0);
+        }
+
+        gl.uniform2f(this.u_resolution, gridWidth, gridHeight);
 
         // Draw full-screen quad
         const a_position = gl.getAttribLocation(this.program, 'a_position');

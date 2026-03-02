@@ -22,14 +22,27 @@ void main() {
     vec4 state = texture2D(u_state, centerUV);
     vec4 weights = texture2D(u_weights, centerUV);
 
-    float error = state.g; // prediction error
-    float absError = abs(error);
+    // Column index for this cell
+    float col = floor(cell.x);
 
-    // Map error to color: positive = color_pos, negative = color_neg
-    vec3 errorColor = error > 0.0 ? u_color_pos : u_color_neg;
+    // For input (col 0) and output (last col): show representation channel
+    // For interior columns: show error channel
+    bool isClampedCol = (col < 0.5) || (col > u_resolution.x - 1.5);
+    float value = isClampedCol ? state.r : state.g;
+    float absValue = abs(value);
 
-    // Alpha from error magnitude (clamped)
-    float alpha = clamp(absError * 5.0, 0.05, 1.0);
+    // Color: clamped columns use green/cyan, interior uses error colors
+    vec3 valueColor;
+    if (isClampedCol) {
+        valueColor = value > 0.0
+            ? vec3(0.0, 1.0, 0.6)   // green for positive (active input)
+            : vec3(0.0, 0.4, 0.6);  // dark cyan for negative
+    } else {
+        valueColor = value > 0.0 ? u_color_pos : u_color_neg;
+    }
+
+    // Alpha from value magnitude (clamped)
+    float alpha = clamp(absValue * 5.0, 0.05, 1.0);
 
     // Gap blending: check if we're in the gap region between cells
     float gapSize = 0.12; // fraction of cell that is gap
@@ -55,7 +68,7 @@ void main() {
     // Strong connection = color bleeds through; weak = black gap
     float gapDarkness = inGap * (1.0 - connectionStrength);
 
-    vec3 finalColor = errorColor * alpha * (1.0 - gapDarkness);
+    vec3 finalColor = valueColor * alpha * (1.0 - gapDarkness);
 
     gl_FragColor = vec4(finalColor, 1.0);
 }

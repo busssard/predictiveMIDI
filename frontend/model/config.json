@@ -1,4 +1,6 @@
 {
+  "grid_width": 16,
+  "grid_height": 128,
   "grid_size": 128,
   "num_instruments": 16,
   "vocabulary": {

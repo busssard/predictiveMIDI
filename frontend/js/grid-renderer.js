@@ -18,7 +18,7 @@ export class GridRenderer {
         this.u_color_neg = gl.getUniformLocation(this.program, 'u_color_neg');
     }
 
-    render(stateTexture, weightsTexture, gridSize, canvasWidth, canvasHeight) {
+    render(stateTexture, weightsTexture, gridWidth, gridHeight, canvasWidth, canvasHeight) {
         const gl = this.gl;
 
         gl.useProgram(this.program);
@@ -33,7 +33,7 @@ export class GridRenderer {
         gl.bindTexture(gl.TEXTURE_2D, weightsTexture);
         gl.uniform1i(this.u_weights, 1);
 
-        gl.uniform2f(this.u_resolution, gridSize, gridSize);
+        gl.uniform2f(this.u_resolution, gridWidth, gridHeight);
 
         // Default colors — configurable later
         gl.uniform3f(this.u_color_pos, 1.0, 0.3, 0.2); // warm red
