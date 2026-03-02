@@ -427,6 +427,109 @@ Just raw floats into textures.
 
 ---
 
+## Known Stability Issues & Mitigations
+
+Predictive coding networks are prone to several instabilities, especially with
+incremental updates (iPC) and 2D grid topologies. This section catalogs the known
+failure modes and strategies from the literature. None of these are currently
+implemented — they're documented here for future reference.
+
+### 1. Error Explosion
+
+**Problem**: Without clipping, prediction errors can grow without bound, causing
+NaN/Inf in representations and weights. This is the most common training failure.
+
+**Mitigations**:
+- **Error clipping**: Clamp `e` to `[-clip, clip]` after computing. Simple and
+  effective. Common values: clip = 5.0–10.0. (Whittington & Bogacz, 2017)
+- **Gradient scaling**: Scale the error signal by `1 / (1 + |e|)` to soft-clip
+  rather than hard-clip. Preserves gradient direction.
+
+### 2. Representational Collapse
+
+**Problem**: All neurons converge to the same value (usually 0), losing all
+information. The grid "goes dark." This happens when weight updates are too
+aggressive relative to representation updates.
+
+**Mitigations**:
+- **Weight decay**: `w *= (1 - lambda)` each step, preventing any single weight
+  from dominating. Lambda = 1e-4 to 1e-3 is typical.
+- **Learning rate separation**: Keep `lr_weights << lr_representations`. Our
+  current ratio (0.1x) follows Millidge et al. (2022).
+- **Spectral normalization**: Constrain the spectral norm of weight matrices.
+  Expensive but theoretically grounded.
+
+### 3. Precision Weighting
+
+**Problem**: Standard PC treats all prediction errors equally, but some neurons'
+predictions are inherently noisier than others. The network wastes capacity
+trying to minimize noise.
+
+**Mitigations**:
+- **Learned precisions**: Each neuron pair learns a precision parameter `pi` that
+  scales its error: `e_weighted = pi * e`. High precision = "I trust this
+  prediction." (Friston, 2005; Bogacz, 2017)
+- **Log-precision parameterization**: Learn `log(pi)` instead of `pi` to avoid
+  negative precision. Update rule: `log_pi += lr * (e^2 - 1/pi)`.
+- This is the PC equivalent of attention — the network learns where to look.
+
+### 4. Adaptive Step Size
+
+**Problem**: Fixed learning rates are fragile. Too high = divergence, too low =
+stagnation. The optimal rate changes during training as the error landscape
+shifts.
+
+**Mitigations**:
+- **Per-neuron adaptive rates**: Adam-like momentum on the representation
+  updates. (Millidge et al., 2021)
+- **Line search**: After computing the update direction, search for the step size
+  that minimizes error along that direction. Expensive but robust. (Bogacz, 2017)
+- **Warm-up schedule**: Start with small lr, ramp up over first N steps.
+
+### 5. Weight Decay vs. Hard Clipping
+
+**Problem**: Weight magnitudes grow monotonically under iPC because updates are
+proportional to `e * tanh(r)`, and both can be consistently positive.
+
+**Mitigations**:
+- **L2 weight decay**: `w -= lambda * w` each step. Simple, smooth.
+- **Hard clipping**: `w = clip(w, -max_w, max_w)`. Abrupt but guarantees bounds.
+  Common with `max_w = 2.0–5.0`.
+- **Weight normalization**: Normalize each neuron's outgoing weight vector to
+  unit norm. Forces competition between connections.
+
+### 6. Temporal Stability
+
+**Problem**: The leaky integrator `s` and recurrent state `h` can accumulate
+unbounded values over long sequences, especially during curriculum phase 3.
+
+**Mitigations**:
+- **State clipping**: Clamp `s` and `h` to `[-1, 1]` since they're used with
+  tanh anyway.
+- **Periodic state reset**: Zero out `s` and `h` between training snippets (we
+  already do this).
+- **Gradient clipping on alpha/beta**: Prevent `alpha` from reaching exactly 1.0
+  (infinite memory) by clamping to `[0, 0.999]`.
+
+### Key References
+
+- **Friston (2005)** — "A theory of cortical responses." Foundational PC paper;
+  introduces precision weighting.
+- **Bogacz (2017)** — "A tutorial on the free-energy framework for modelling
+  perception and learning." Practical PC tutorial; adaptive step sizes.
+- **Whittington & Bogacz (2017)** — "An approximation of the error
+  backpropagation algorithm in a predictive coding network with local Hebbian
+  synaptic plasticity." Error clipping, iPC convergence.
+- **Millidge, Tschantz & Buckley (2021)** — "Predictive Coding Approximates
+  Backprop along Arbitrary Computation Graphs." Theoretical grounding for
+  iPC; lr separation analysis.
+- **Millidge, Seth & Buckley (2022)** — "Predictive coding: a theoretical and
+  experimental review." Comprehensive survey; stability best practices.
+- **Salvatori et al. (2023)** — "Brain-Inspired Computational Intelligence via
+  Predictive Coding." Modern survey covering 2D/grid topologies.
+
+---
+
 ## Open Questions (to resolve during implementation)
 
 - **Exact color palette** — to be determined experimentally once rendering works.

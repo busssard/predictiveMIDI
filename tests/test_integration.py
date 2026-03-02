@@ -42,7 +42,7 @@ class TestEndToEnd:
         )
         errors = []
         for _ in range(3):
-            err = trainer.train_step(batch_size=2)
+            err, meta = trainer.train_step(batch_size=2)
             errors.append(err)
             assert np.isfinite(err)
 
