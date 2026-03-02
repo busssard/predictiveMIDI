@@ -159,6 +159,10 @@ function startPolling() {
             const st = await API.status();
             isRunning = st.running;
             updateStatusUI(st);
+            // Update chart with latest metrics
+            if (st.run_id) {
+                await loadRunMetrics(st.run_id);
+            }
             if (!st.running) {
                 stopPolling();
                 await loadRuns();
