@@ -141,12 +141,10 @@ def pc_relaxation_step(state, weights, params, activation_fn=None,
     # Update temporal state
     new_s = alpha * s + (1.0 - alpha) * r
 
-    # Temporal state with learnable gain
-    new_w_temporal_out = None
+    # Temporal state with learnable gain (w_temporal updated per tick, not per relaxation step)
+    new_w_temporal_out = w_temporal
     if w_temporal is not None:
         new_h = w_temporal * activation_fn(h)
-        # Hebbian update for w_temporal
-        new_w_temporal_out = w_temporal + lr * 0.01 * activation_fn(h) * r
     else:
         new_h = beta * activation_fn(h)
 

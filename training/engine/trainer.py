@@ -135,6 +135,13 @@ def _make_train_fn(relaxation_steps, activation_fn=None,
                     (st, wt, lp, r_prev_init, fcw, fcsw, wt_temp),
                     step_indices,
                 )
+                # Hebbian update for w_temporal: once per tick, not per relaxation step
+                if use_w_temporal:
+                    final_r = new_st[:, :, 0]
+                    final_h = new_st[:, :, 3]
+                    lr_grid = params[:, :, 2]
+                    new_wt_temp = new_wt_temp + lr_grid * 0.01 * activation_fn(final_h) * final_r
+
                 return ((new_st, new_wt, new_lp, new_fcw, new_fcsw, new_wt_temp),
                         (full_errors[-1], active_errors[-1]))
 

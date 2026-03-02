@@ -202,8 +202,8 @@ class TestPCRelaxationStep:
         # States should differ because spiking changes effective precision
         assert not jnp.allclose(result_no_spike[0], result_spike[0])
 
-    def test_w_temporal_updates(self):
-        """w_temporal should change after a step with Hebbian learning."""
+    def test_w_temporal_passes_through(self):
+        """w_temporal passes through relaxation step unchanged (Hebbian update is per-tick in trainer)."""
         grid = create_grid(width=8, height=8, num_instruments=2)
         state = grid.state.at[:, :, 0].set(0.5)
         state = state.at[:, :, 3].set(0.3)  # Set h channel
@@ -214,7 +214,7 @@ class TestPCRelaxationStep:
             w_temporal=w_temporal)
         new_wt = result[5]
         assert new_wt is not None
-        assert not jnp.allclose(new_wt, w_temporal)
+        assert jnp.allclose(new_wt, w_temporal)
 
     def test_independent_lr_w(self):
         """Independent lr_w should control weight update magnitude."""
