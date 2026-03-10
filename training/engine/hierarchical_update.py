@@ -19,6 +19,7 @@ def hierarchical_relaxation_step(
     prediction_weights: List[jnp.ndarray],
     prediction_biases: List[jnp.ndarray],
     skip_weights: List[jnp.ndarray],
+    skip_biases: List[jnp.ndarray],
     temporal_weights: List[jnp.ndarray],
     temporal_state: List[jnp.ndarray],
     layer_sizes: List[int],
@@ -30,7 +31,8 @@ def hierarchical_relaxation_step(
     output_supervision: float = 0.0,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray],
            List[jnp.ndarray], List[jnp.ndarray],
-           List[jnp.ndarray], List[jnp.ndarray]]:
+           List[jnp.ndarray], List[jnp.ndarray],
+           List[jnp.ndarray]]:
     """One relaxation step of the hierarchical PC network.
 
     Args:
@@ -38,6 +40,7 @@ def hierarchical_relaxation_step(
         prediction_weights: list of (H_low, H_high) — W_pred[i] predicts layer i from i+1
         prediction_biases: list of (H_low,) — per-layer prediction bias
         skip_weights: list of (H_dec, H_enc) — skip from encoder i to decoder N-1-i
+        skip_biases: list of (H_dec,) — per-skip-connection bias
         temporal_weights: list of (H_l, H_l) — temporal prediction per layer
         temporal_state: list of (H_l,) — previous tick representations
         layer_sizes: list of ints
@@ -50,7 +53,8 @@ def hierarchical_relaxation_step(
 
     Returns:
         new_representations, new_errors, new_prediction_weights,
-        new_prediction_biases, new_skip_weights, new_temporal_weights
+        new_prediction_biases, new_skip_weights, new_skip_biases,
+        new_temporal_weights
     """
     if clamp_mask is None:
         clamp_mask = {}
@@ -74,7 +78,7 @@ def hierarchical_relaxation_step(
         dec_idx = num_layers - 1 - si
         if enc_idx != dec_idx:
             x_enc = activation_fn(representations[enc_idx])
-            skip_pred = skip_weights[si] @ x_enc
+            skip_pred = skip_weights[si] @ x_enc + skip_biases[si]
             predictions[dec_idx] = predictions[dec_idx] + skip_pred
 
     # Temporal predictions (mild influence)
@@ -140,8 +144,9 @@ def hierarchical_relaxation_step(
             new_pred_w[i],
         )
 
-    # Update skip weights (same lr as prediction — skip connections are critical)
+    # Update skip weights and biases
     new_skip_w = list(skip_weights)
+    new_skip_b = list(skip_biases)
     for si in range(n_skip):
         enc_idx = si
         dec_idx = num_layers - 1 - si
@@ -150,6 +155,9 @@ def hierarchical_relaxation_step(
             e_dec = errors[dec_idx]
             dw = jnp.outer(e_dec, x_enc)
             new_skip_w[si] = skip_weights[si] + lr_w * dw
+
+            # Skip bias update: direct error signal (fast, absorbs mean)
+            new_skip_b[si] = skip_biases[si] + lr_w * e_dec
 
             frob = jnp.sqrt(jnp.sum(new_skip_w[si] ** 2))
             min_dim = float(min(new_skip_w[si].shape))
@@ -178,4 +186,4 @@ def hierarchical_relaxation_step(
             new_temp_w[i],
         )
 
-    return new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w
+    return new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_skip_b, new_temp_w

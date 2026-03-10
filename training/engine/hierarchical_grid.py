@@ -21,6 +21,7 @@ class HierarchicalGridState:
     prediction_weights: list of (H_low, H_high) — W_pred[i] predicts layer i from i+1
     prediction_biases: list of (H_low,) — per-layer prediction bias
     skip_weights: list of (H_dec, H_enc) — skip from encoder i to decoder N-1-i
+    skip_biases: list of (H_dec,) — per-skip-connection bias
     temporal_weights: list of (H_l, H_l) — temporal prediction per layer
     temporal_state: list of (H_l,) — previous tick's representation
     layer_sizes: list of ints
@@ -35,6 +36,7 @@ class HierarchicalGridState:
     prediction_weights: List[jnp.ndarray]
     prediction_biases: List[jnp.ndarray]
     skip_weights: List[jnp.ndarray]
+    skip_biases: List[jnp.ndarray]
     temporal_weights: List[jnp.ndarray]
     temporal_state: List[jnp.ndarray]
     layer_sizes: List[int]
@@ -109,6 +111,12 @@ def create_hierarchical_grid(
         w = jax.random.normal(subkey, (h_dec, h_enc)) * scale
         skip_weights.append(w)
 
+    # Skip biases: (H_dec,) per skip connection — captures average skip prediction
+    skip_biases = []
+    for i in range(n_skip):
+        j = num_layers - 1 - i
+        skip_biases.append(jnp.zeros(layer_sizes[j]))
+
     # Temporal weights: predict current tick from previous tick, per layer
     # Smaller than spatial weights (temporal is auxiliary)
     temporal_weights = []
@@ -125,6 +133,7 @@ def create_hierarchical_grid(
         prediction_weights=prediction_weights,
         prediction_biases=prediction_biases,
         skip_weights=skip_weights,
+        skip_biases=skip_biases,
         temporal_weights=temporal_weights,
         temporal_state=temporal_state,
         layer_sizes=layer_sizes,

@@ -7,12 +7,13 @@ from training.engine.hierarchical_update import hierarchical_relaxation_step
 class TestHierarchicalRelaxationStep:
     def test_output_shapes_match_input(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
-        new_reps, new_errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w = \
-            hierarchical_relaxation_step(
+        new_reps, new_errors, new_pred_w, new_pred_b, new_skip_w, new_skip_b, \
+            new_temp_w = hierarchical_relaxation_step(
                 grid.representations,
                 grid.prediction_weights,
                 grid.prediction_biases,
                 grid.skip_weights,
+                grid.skip_biases,
                 grid.temporal_weights,
                 grid.temporal_state,
                 grid.layer_sizes,
@@ -25,11 +26,12 @@ class TestHierarchicalRelaxationStep:
 
     def test_error_shapes(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
-        _, errors, _, _, _, _ = hierarchical_relaxation_step(
+        _, errors, _, _, _, _, _ = hierarchical_relaxation_step(
             grid.representations,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -41,12 +43,13 @@ class TestHierarchicalRelaxationStep:
     def test_all_outputs_finite(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
         reps = [jnp.ones(s) * 0.5 for s in grid.layer_sizes]
-        new_reps, new_errors, new_pred_w, new_pred_b, new_skip_w, _ = \
-            hierarchical_relaxation_step(
+        new_reps, new_errors, new_pred_w, new_pred_b, new_skip_w, new_skip_b, \
+            _ = hierarchical_relaxation_step(
                 reps,
                 grid.prediction_weights,
                 grid.prediction_biases,
                 grid.skip_weights,
+                grid.skip_biases,
                 grid.temporal_weights,
                 grid.temporal_state,
                 grid.layer_sizes,
@@ -67,11 +70,12 @@ class TestHierarchicalRelaxationStep:
         pred_w = grid.prediction_weights
         pred_b = grid.prediction_biases
         skip_w = grid.skip_weights
+        skip_b = grid.skip_biases
         temp_w = grid.temporal_weights
         for step in range(20):
-            reps, errors, pred_w, pred_b, skip_w, temp_w = \
+            reps, errors, pred_w, pred_b, skip_w, skip_b, temp_w = \
                 hierarchical_relaxation_step(
-                    reps, pred_w, pred_b, skip_w,
+                    reps, pred_w, pred_b, skip_w, skip_b,
                     temp_w, grid.temporal_state,
                     grid.layer_sizes,
                     lr=0.01, lr_w=0.001, lambda_sparse=0.0,
@@ -88,11 +92,12 @@ class TestHierarchicalRelaxationStep:
         reps = list(grid.representations)
         reps[0] = clamp_val
 
-        new_reps, _, _, _, _, _ = hierarchical_relaxation_step(
+        new_reps, _, _, _, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -108,11 +113,12 @@ class TestHierarchicalRelaxationStep:
                 for i, s in enumerate(grid.layer_sizes)]
         old_w = [w.copy() for w in grid.prediction_weights]
 
-        _, _, new_pred_w, _, _, _ = hierarchical_relaxation_step(
+        _, _, new_pred_w, _, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -128,11 +134,12 @@ class TestHierarchicalRelaxationStep:
                 for i, s in enumerate(grid.layer_sizes)]
         old_skip = [w.copy() for w in grid.skip_weights]
 
-        _, _, _, _, new_skip_w, _ = hierarchical_relaxation_step(
+        _, _, _, _, new_skip_w, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -147,11 +154,12 @@ class TestHierarchicalRelaxationStep:
         reps = [jax.random.normal(jax.random.PRNGKey(i), (s,)) * 0.1
                 for i, s in enumerate(grid.layer_sizes)]
 
-        new_reps, errors, _, _, _, _ = hierarchical_relaxation_step(
+        new_reps, errors, _, _, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -166,11 +174,12 @@ class TestHierarchicalRelaxationStep:
         # Create large representations to generate large gradients
         reps = [jnp.ones(s) * 10.0 for s in grid.layer_sizes]
 
-        _, _, new_pred_w, _, _, _ = hierarchical_relaxation_step(
+        _, _, new_pred_w, _, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
@@ -192,11 +201,12 @@ class TestHierarchicalRelaxationStep:
                   for i, s in enumerate(grid.layer_sizes)]
         old_temp = [w.copy() for w in grid.temporal_weights]
 
-        _, _, _, _, _, new_temp_w = hierarchical_relaxation_step(
+        _, _, _, _, _, _, new_temp_w = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             temp_s,
             grid.layer_sizes,
@@ -212,16 +222,18 @@ class TestHierarchicalRelaxationStep:
         target = jnp.ones(16) * 3.0  # strong positive target
 
         # Without supervision
-        new_reps_no_sup, _, _, _, _, _ = hierarchical_relaxation_step(
+        new_reps_no_sup, _, _, _, _, _, _ = hierarchical_relaxation_step(
             reps, grid.prediction_weights, grid.prediction_biases,
-            grid.skip_weights, grid.temporal_weights, grid.temporal_state,
+            grid.skip_weights, grid.skip_biases,
+            grid.temporal_weights, grid.temporal_state,
             grid.layer_sizes,
             output_target=target, output_supervision=0.0,
         )
         # With supervision
-        new_reps_sup, _, _, _, _, _ = hierarchical_relaxation_step(
+        new_reps_sup, _, _, _, _, _, _ = hierarchical_relaxation_step(
             reps, grid.prediction_weights, grid.prediction_biases,
-            grid.skip_weights, grid.temporal_weights, grid.temporal_state,
+            grid.skip_weights, grid.skip_biases,
+            grid.temporal_weights, grid.temporal_state,
             grid.layer_sizes,
             output_target=target, output_supervision=1.0,
         )
@@ -237,15 +249,37 @@ class TestHierarchicalRelaxationStep:
                 for i, s in enumerate(grid.layer_sizes)]
         old_b = [b.copy() for b in grid.prediction_biases]
 
-        _, _, _, new_pred_b, _, _ = hierarchical_relaxation_step(
+        _, _, _, new_pred_b, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.prediction_biases,
             grid.skip_weights,
+            grid.skip_biases,
             grid.temporal_weights,
             grid.temporal_state,
             grid.layer_sizes,
             lr=0.01, lr_w=0.01, lambda_sparse=0.0,
         )
         for old, new in zip(old_b, new_pred_b):
+            assert not jnp.allclose(old, new)
+
+    def test_skip_biases_change(self):
+        """Skip biases should update from decoder errors."""
+        grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
+        reps = [jax.random.normal(jax.random.PRNGKey(i), (s,))
+                for i, s in enumerate(grid.layer_sizes)]
+        old_b = [b.copy() for b in grid.skip_biases]
+
+        _, _, _, _, _, new_skip_b, _ = hierarchical_relaxation_step(
+            reps,
+            grid.prediction_weights,
+            grid.prediction_biases,
+            grid.skip_weights,
+            grid.skip_biases,
+            grid.temporal_weights,
+            grid.temporal_state,
+            grid.layer_sizes,
+            lr=0.01, lr_w=0.01, lambda_sparse=0.0,
+        )
+        for old, new in zip(old_b, new_skip_b):
             assert not jnp.allclose(old, new)
