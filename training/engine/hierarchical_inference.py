@@ -42,6 +42,11 @@ def load_hierarchical_checkpoint(checkpoint_path):
         if f.exists():
             grid.prediction_weights[i] = jnp.array(np.load(f))
 
+    for i in range(len(grid.prediction_biases)):
+        f = path / f"pred_bias_{i}.npy"
+        if f.exists():
+            grid.prediction_biases[i] = jnp.array(np.load(f))
+
     for i in range(len(grid.skip_weights)):
         f = path / f"skip_weight_{i}.npy"
         if f.exists():
@@ -81,21 +86,23 @@ def run_hierarchical_inference(grid, input_piano_roll, conditioning_vec,
 
     # JIT the relaxation step
     @jax.jit
-    def relax_step(reps, pred_w, skip_w, temp_w, temp_s, clamp_input):
-        new_reps, errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
-            reps, pred_w, skip_w, temp_w, temp_s,
-            grid.layer_sizes,
-            lr=grid.lr * 0.5,  # reduced lr for inference stability
-            lr_w=0.0,  # no weight learning
-            lambda_sparse=grid.lambda_sparse,
-        )
+    def relax_step(reps, pred_w, pred_b, skip_w, temp_w, temp_s, clamp_input):
+        new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w = \
+            hierarchical_relaxation_step(
+                reps, pred_w, pred_b, skip_w, temp_w, temp_s,
+                grid.layer_sizes,
+                lr=grid.lr * 0.5,  # reduced lr for inference stability
+                lr_w=0.0,  # no weight learning
+                lambda_sparse=grid.lambda_sparse,
+            )
         # Clamp only input layer
         new_reps_out = list(new_reps)
         new_reps_out[0] = clamp_input
-        return new_reps_out, errors, new_pred_w, new_skip_w
+        return new_reps_out, errors, new_pred_w, new_pred_b, new_skip_w
 
     reps = list(grid.representations)
     pred_w = list(grid.prediction_weights)
+    pred_b = list(grid.prediction_biases)
     skip_w = list(grid.skip_weights)
     temp_w = list(grid.temporal_weights)
     temp_s = list(grid.temporal_state)
@@ -109,8 +116,8 @@ def run_hierarchical_inference(grid, input_piano_roll, conditioning_vec,
         inp_with_cond = jnp.clip(jnp.array(inp) + jnp.array(cond_full), 0.0, 1.0)
 
         for step in range(relaxation_steps):
-            reps, errors, pred_w, skip_w = relax_step(
-                reps, pred_w, skip_w, temp_w, temp_s, inp_with_cond)
+            reps, errors, pred_w, pred_b, skip_w = relax_step(
+                reps, pred_w, pred_b, skip_w, temp_w, temp_s, inp_with_cond)
 
         # Read output
         output = jax.nn.sigmoid(reps[-1])

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 def hierarchical_relaxation_step(
     representations: List[jnp.ndarray],
     prediction_weights: List[jnp.ndarray],
+    prediction_biases: List[jnp.ndarray],
     skip_weights: List[jnp.ndarray],
     temporal_weights: List[jnp.ndarray],
     temporal_state: List[jnp.ndarray],
@@ -29,12 +30,13 @@ def hierarchical_relaxation_step(
     output_supervision: float = 0.0,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray],
            List[jnp.ndarray], List[jnp.ndarray],
-           List[jnp.ndarray]]:
+           List[jnp.ndarray], List[jnp.ndarray]]:
     """One relaxation step of the hierarchical PC network.
 
     Args:
         representations: list of (H_l,) per layer
         prediction_weights: list of (H_low, H_high) — W_pred[i] predicts layer i from i+1
+        prediction_biases: list of (H_low,) — per-layer prediction bias
         skip_weights: list of (H_dec, H_enc) — skip from encoder i to decoder N-1-i
         temporal_weights: list of (H_l, H_l) — temporal prediction per layer
         temporal_state: list of (H_l,) — previous tick representations
@@ -48,7 +50,7 @@ def hierarchical_relaxation_step(
 
     Returns:
         new_representations, new_errors, new_prediction_weights,
-        new_skip_weights, new_temporal_weights
+        new_prediction_biases, new_skip_weights, new_temporal_weights
     """
     if clamp_mask is None:
         clamp_mask = {}
@@ -59,10 +61,10 @@ def hierarchical_relaxation_step(
     # Compute predictions for each layer
     predictions = [jnp.zeros(s) for s in layer_sizes]
 
-    # Top-down predictions: layer i+1 predicts layer i
+    # Top-down predictions: layer i+1 predicts layer i (with bias)
     for i in range(num_layers - 1):
         x_high = activation_fn(representations[i + 1])
-        pred = prediction_weights[i] @ x_high
+        pred = prediction_weights[i] @ x_high + prediction_biases[i]
         predictions[i] = predictions[i] + pred
 
     # Skip connection predictions: encoder i predicts decoder (N-1-i)
@@ -119,10 +121,14 @@ def hierarchical_relaxation_step(
 
     # Update prediction weights (Hebbian: dW = e_low @ x_high.T)
     new_pred_w = list(prediction_weights)
+    new_pred_b = list(prediction_biases)
     for i in range(num_layers - 1):
         x_high = activation_fn(representations[i + 1])
         dw = jnp.outer(errors[i], x_high)
         new_pred_w[i] = prediction_weights[i] + lr_w * dw
+
+        # Bias update: direct error signal (not rank-1, so learns fast)
+        new_pred_b[i] = prediction_biases[i] + lr_w * errors[i]
 
         # Spectral normalization with relaxed threshold
         frob = jnp.sqrt(jnp.sum(new_pred_w[i] ** 2))
@@ -172,4 +178,4 @@ def hierarchical_relaxation_step(
             new_temp_w[i],
         )
 
-    return new_reps, errors, new_pred_w, new_skip_w, new_temp_w
+    return new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w

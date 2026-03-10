@@ -28,23 +28,24 @@ def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
     """
 
     @jax.jit
-    def jit_step(reps, pred_w, skip_w, temp_w, temp_s,
+    def jit_step(reps, pred_w, pred_b, skip_w, temp_w, temp_s,
                  clamp_0, clamp_last, do_clamp_0, do_clamp_last,
                  output_target, sup_strength):
         """JIT-friendly relaxation step with optional clamping + supervision."""
-        new_reps, errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
-            reps, pred_w, skip_w, temp_w, temp_s,
-            layer_sizes, lr, lr_w, lam,
-            output_target=output_target,
-            output_supervision=sup_strength,
-        )
+        new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w = \
+            hierarchical_relaxation_step(
+                reps, pred_w, pred_b, skip_w, temp_w, temp_s,
+                layer_sizes, lr, lr_w, lam,
+                output_target=output_target,
+                output_supervision=sup_strength,
+            )
 
         # Apply clamping post-hoc (always compute both, conditionally apply)
         new_reps_out = list(new_reps)
         new_reps_out[0] = jnp.where(do_clamp_0, clamp_0, new_reps_out[0])
         new_reps_out[-1] = jnp.where(do_clamp_last, clamp_last, new_reps_out[-1])
 
-        return new_reps_out, errors, new_pred_w, new_skip_w, new_temp_w
+        return new_reps_out, errors, new_pred_w, new_pred_b, new_skip_w, new_temp_w
 
     return jit_step
 
@@ -162,6 +163,7 @@ class HierarchicalTrainer:
 
         # Accumulate weight updates across batch
         acc_pred_w = [jnp.zeros_like(w) for w in self.grid.prediction_weights]
+        acc_pred_b = [jnp.zeros_like(b) for b in self.grid.prediction_biases]
         acc_skip_w = [jnp.zeros_like(w) for w in self.grid.skip_weights]
         acc_temp_w = [jnp.zeros_like(w) for w in self.grid.temporal_weights]
 
@@ -174,11 +176,13 @@ class HierarchicalTrainer:
             tgt_seq = all_targets[b]  # (T, H_out)
             cond = all_conds[b]       # (H_in,)
 
-            ex_pred_w, ex_skip_w, ex_temp_w, ex_error, ex_active, tp, fp, fn = \
-                self._process_example(inp_seq, tgt_seq, cond)
+            ex_pred_w, ex_pred_b, ex_skip_w, ex_temp_w, ex_error, ex_active, tp, fp, fn = \
+                self._process_example(inp_seq, tgt_seq, cond)  # noqa: E501
 
             for i in range(len(acc_pred_w)):
                 acc_pred_w[i] = acc_pred_w[i] + ex_pred_w[i]
+            for i in range(len(acc_pred_b)):
+                acc_pred_b[i] = acc_pred_b[i] + ex_pred_b[i]
             for i in range(len(acc_skip_w)):
                 acc_skip_w[i] = acc_skip_w[i] + ex_skip_w[i]
             for i in range(len(acc_temp_w)):
@@ -192,6 +196,7 @@ class HierarchicalTrainer:
 
         # Average across batch
         self.grid.prediction_weights = [w / batch_size for w in acc_pred_w]
+        self.grid.prediction_biases = [b / batch_size for b in acc_pred_b]
         self.grid.skip_weights = [w / batch_size for w in acc_skip_w]
         self.grid.temporal_weights = [w / batch_size for w in acc_temp_w]
 
@@ -220,6 +225,7 @@ class HierarchicalTrainer:
         T = inp_seq.shape[0]
         reps = list(self.grid.representations)
         pred_w = list(self.grid.prediction_weights)
+        pred_b = list(self.grid.prediction_biases)
         skip_w = list(self.grid.skip_weights)
         temp_w = list(self.grid.temporal_weights)
         temp_s = list(self.grid.temporal_state)
@@ -249,8 +255,8 @@ class HierarchicalTrainer:
             do_clamp_last = jnp.bool_(do_clamp_output)
             sup = jnp.float32(self.output_supervision)
             for step in range(self.relaxation_steps):
-                reps, errors, pred_w, skip_w, temp_w = self._jit_step(
-                    reps, pred_w, skip_w, temp_w, temp_s,
+                reps, errors, pred_w, pred_b, skip_w, temp_w = self._jit_step(
+                    reps, pred_w, pred_b, skip_w, temp_w, temp_s,
                     input_with_cond, tgt_logit,
                     do_clamp_0, do_clamp_last,
                     tgt_logit, sup,
@@ -282,7 +288,7 @@ class HierarchicalTrainer:
         else:
             tp, fp, fn = 0.0, 0.0, 0.0
 
-        return pred_w, skip_w, temp_w, total_error / max(T, 1), total_active / max(T, 1), tp, fp, fn  # noqa: E501
+        return pred_w, pred_b, skip_w, temp_w, total_error / max(T, 1), total_active / max(T, 1), tp, fp, fn  # noqa: E501
 
     def save_checkpoint(self, path):
         """Save hierarchical grid state to directory."""
@@ -300,6 +306,8 @@ class HierarchicalTrainer:
         # Save weights
         for i, w in enumerate(self.grid.prediction_weights):
             np.save(path / f"pred_weight_{i}.npy", np.array(w))
+        for i, b in enumerate(self.grid.prediction_biases):
+            np.save(path / f"pred_bias_{i}.npy", np.array(b))
         for i, w in enumerate(self.grid.skip_weights):
             np.save(path / f"skip_weight_{i}.npy", np.array(w))
         for i, w in enumerate(self.grid.temporal_weights):
@@ -333,6 +341,11 @@ class HierarchicalTrainer:
             f = path / f"pred_weight_{i}.npy"
             if f.exists():
                 self.grid.prediction_weights[i] = jnp.array(np.load(f))
+
+        for i in range(len(self.grid.prediction_biases)):
+            f = path / f"pred_bias_{i}.npy"
+            if f.exists():
+                self.grid.prediction_biases[i] = jnp.array(np.load(f))
 
         for i in range(len(self.grid.skip_weights)):
             f = path / f"skip_weight_{i}.npy"
