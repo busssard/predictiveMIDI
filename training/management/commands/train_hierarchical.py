@@ -37,6 +37,10 @@ class Command(BaseCommand):
                             help="L1 sparsity penalty")
         parser.add_argument("--teacher-forcing", type=float, default=1.0,
                             help="Fraction of ticks with output clamped (1.0=always)")
+        parser.add_argument("--tf-min", type=float, default=0.0,
+                            help="Minimum teacher forcing after annealing (default: 0.0)")
+        parser.add_argument("--tf-anneal-steps", type=int, default=0,
+                            help="Steps to anneal TF from initial to min (0=no annealing)")
         parser.add_argument("--curriculum-patience", type=int, default=10)
         parser.add_argument("--phase-1-ticks", type=int, default=16)
         parser.add_argument("--phase-1-threshold", type=float, default=0.15)
@@ -77,6 +81,8 @@ class Command(BaseCommand):
             alpha=options["alpha"],
             lambda_sparse=options["lambda_sparse"],
             teacher_forcing_ratio=options["teacher_forcing"],
+            tf_min=options["tf_min"],
+            tf_anneal_steps=options["tf_anneal_steps"],
             curriculum_phases=curriculum_phases,
             curriculum_patience=options["curriculum_patience"],
             prefetch=True,
@@ -127,13 +133,14 @@ class Command(BaseCommand):
                 run.current_phase = trainer.curriculum.current_phase
                 run.save()
 
+                tf_now = meta.get("teacher_forcing", options["teacher_forcing"])
                 self.stdout.write(
                     f"Step {step}/{options['num_steps']} | "
                     f"Error: {avg_error:.6f} | "
                     f"Active: {active_err:.6f} | "
                     f"F1: {f1:.3f} (P:{prec:.3f} R:{rec:.3f}) | "
                     f"Phase: {trainer.curriculum.current_phase} | "
-                    f"TF: {options['teacher_forcing']:.1f} | "
+                    f"TF: {tf_now:.2f} | "
                     f"Time: {dt:.1f}s"
                 )
 

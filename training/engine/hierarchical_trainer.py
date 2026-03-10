@@ -52,7 +52,8 @@ class HierarchicalTrainer:
                  prefetch=False, prefetch_depth=3,
                  lr=0.01, lr_w=0.001, alpha=0.8, lambda_sparse=0.005,
                  curriculum_phases=None, curriculum_patience=10,
-                 teacher_forcing_ratio=1.0):
+                 teacher_forcing_ratio=1.0,
+                 tf_min=0.0, tf_anneal_steps=0):
         """Initialize hierarchical PC trainer.
 
         Args:
@@ -69,6 +70,10 @@ class HierarchicalTrainer:
         self.relaxation_steps = relaxation_steps
         self.fs = fs
         self.teacher_forcing_ratio = teacher_forcing_ratio
+        self._tf_initial = teacher_forcing_ratio
+        self._tf_min = tf_min
+        self._tf_anneal_steps = tf_anneal_steps
+        self._step_count = 0
 
         self.batch_gen = BatchGenerator(
             midi_dir, snippet_ticks=16, fs=fs,
@@ -119,6 +124,14 @@ class HierarchicalTrainer:
             avg_error: float
             meta: dict with metrics
         """
+        # Anneal teacher forcing ratio
+        self._step_count += 1
+        if self._tf_anneal_steps > 0:
+            progress = min(self._step_count / self._tf_anneal_steps, 1.0)
+            self.teacher_forcing_ratio = (
+                self._tf_initial * (1.0 - progress) + self._tf_min * progress
+            )
+
         self._batch_source.snippet_ticks = self.curriculum.snippet_ticks
         batch = self._batch_source.generate_batch(batch_size)
 
@@ -178,6 +191,7 @@ class HierarchicalTrainer:
             "precision": precision,
             "recall": recall,
             "f1": f1,
+            "teacher_forcing": self.teacher_forcing_ratio,
         }
 
     def _process_example(self, inp_seq, tgt_seq, cond):
