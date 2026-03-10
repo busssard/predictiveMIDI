@@ -91,18 +91,16 @@ def hierarchical_relaxation_step(
 
         # Bottom-up error propagation: this layer predicted layer i-1,
         # so gradients from e[i-1] flow back through W_pred[i-1].T
+        # Include tanh derivative for correct gradient
         if i > 0:
-            update = update + prediction_weights[i - 1].T @ errors[i - 1]
-
-        # Top-down error: if layer i+1 predicted this layer,
-        # this layer also tries to minimize its own error from above
-        # (already captured by -errors[i] above)
+            tanh_deriv = 1.0 - jnp.tanh(representations[i]) ** 2
+            update = update + tanh_deriv * (prediction_weights[i - 1].T @ errors[i - 1])
 
         # Sparsity penalty
         update = update - lambda_sparse * jnp.sign(representations[i])
 
-        # L2 damping for stability
-        update = update - 0.1 * representations[i]
+        # Mild L2 damping for stability (clipping handles explosion)
+        update = update - 0.01 * representations[i]
 
         new_reps[i] = representations[i] + lr * update
         new_reps[i] = jnp.clip(new_reps[i], -5.0, 5.0)
@@ -114,17 +112,17 @@ def hierarchical_relaxation_step(
         dw = jnp.outer(errors[i], x_high)
         new_pred_w[i] = prediction_weights[i] + lr_w * dw
 
-        # Spectral normalization approximation
+        # Spectral normalization with relaxed threshold
         frob = jnp.sqrt(jnp.sum(new_pred_w[i] ** 2))
         min_dim = float(min(new_pred_w[i].shape))
         max_sv_approx = frob / jnp.sqrt(min_dim)
         new_pred_w[i] = jnp.where(
-            max_sv_approx > 1.0,
-            new_pred_w[i] / max_sv_approx,
+            max_sv_approx > 2.0,
+            new_pred_w[i] * (2.0 / max_sv_approx),
             new_pred_w[i],
         )
 
-    # Update skip weights
+    # Update skip weights (same lr as prediction — skip connections are critical)
     new_skip_w = list(skip_weights)
     for si in range(n_skip):
         enc_idx = si
@@ -133,15 +131,33 @@ def hierarchical_relaxation_step(
             x_enc = activation_fn(representations[enc_idx])
             e_dec = errors[dec_idx]
             dw = jnp.outer(e_dec, x_enc)
-            new_skip_w[si] = skip_weights[si] + lr_w * 0.1 * dw
+            new_skip_w[si] = skip_weights[si] + lr_w * dw
 
             frob = jnp.sqrt(jnp.sum(new_skip_w[si] ** 2))
             min_dim = float(min(new_skip_w[si].shape))
             max_sv_approx = frob / jnp.sqrt(min_dim)
             new_skip_w[si] = jnp.where(
-                max_sv_approx > 1.0,
-                new_skip_w[si] / max_sv_approx,
+                max_sv_approx > 2.0,
+                new_skip_w[si] * (2.0 / max_sv_approx),
                 new_skip_w[si],
             )
 
-    return new_reps, errors, new_pred_w, new_skip_w
+    # Update temporal weights (Hebbian at relaxation level)
+    new_temp_w = list(temporal_weights)
+    for i in range(num_layers):
+        temp_pred = temporal_weights[i] @ activation_fn(temporal_state[i])
+        temp_error = representations[i] - temp_pred
+        dw = jnp.outer(temp_error, activation_fn(temporal_state[i]))
+        new_temp_w[i] = temporal_weights[i] + lr_w * 0.1 * dw
+
+        # Spectral norm for temporal weights
+        frob = jnp.sqrt(jnp.sum(new_temp_w[i] ** 2))
+        dim = float(new_temp_w[i].shape[0])
+        max_sv_approx = frob / jnp.sqrt(dim)
+        new_temp_w[i] = jnp.where(
+            max_sv_approx > 2.0,
+            new_temp_w[i] * (2.0 / max_sv_approx),
+            new_temp_w[i],
+        )
+
+    return new_reps, errors, new_pred_w, new_skip_w, new_temp_w

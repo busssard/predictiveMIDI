@@ -82,7 +82,7 @@ def run_hierarchical_inference(grid, input_piano_roll, conditioning_vec,
     # JIT the relaxation step
     @jax.jit
     def relax_step(reps, pred_w, skip_w, temp_w, temp_s, clamp_input):
-        new_reps, errors, new_pred_w, new_skip_w = hierarchical_relaxation_step(
+        new_reps, errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
             reps, pred_w, skip_w, temp_w, temp_s,
             grid.layer_sizes,
             lr=grid.lr * 0.5,  # reduced lr for inference stability

@@ -31,7 +31,7 @@ def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
     def jit_step(reps, pred_w, skip_w, temp_w, temp_s,
                  clamp_0, clamp_last, do_clamp_0, do_clamp_last):
         """JIT-friendly relaxation step with optional clamping."""
-        new_reps, errors, new_pred_w, new_skip_w = hierarchical_relaxation_step(
+        new_reps, errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
             reps, pred_w, skip_w, temp_w, temp_s,
             layer_sizes, lr, lr_w, lam,
         )
@@ -41,7 +41,7 @@ def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
         new_reps_out[0] = jnp.where(do_clamp_0, clamp_0, new_reps_out[0])
         new_reps_out[-1] = jnp.where(do_clamp_last, clamp_last, new_reps_out[-1])
 
-        return new_reps_out, errors, new_pred_w, new_skip_w
+        return new_reps_out, errors, new_pred_w, new_skip_w, new_temp_w
 
     return jit_step
 
@@ -211,7 +211,7 @@ class HierarchicalTrainer:
             do_clamp_0 = jnp.bool_(True)
             do_clamp_last = jnp.bool_(do_clamp_output)
             for step in range(self.relaxation_steps):
-                reps, errors, pred_w, skip_w = self._jit_step(
+                reps, errors, pred_w, skip_w, temp_w = self._jit_step(
                     reps, pred_w, skip_w, temp_w, temp_s,
                     input_with_cond, tgt,
                     do_clamp_0, do_clamp_last,
@@ -243,7 +243,7 @@ class HierarchicalTrainer:
         else:
             tp, fp, fn = 0.0, 0.0, 0.0
 
-        return pred_w, skip_w, temp_w, total_error / max(T, 1), total_active / max(T, 1), tp, fp, fn
+        return pred_w, skip_w, temp_w, total_error / max(T, 1), total_active / max(T, 1), tp, fp, fn  # noqa: E501
 
     def save_checkpoint(self, path):
         """Save hierarchical grid state to directory."""

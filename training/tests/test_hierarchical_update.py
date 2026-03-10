@@ -7,7 +7,7 @@ from training.engine.hierarchical_update import hierarchical_relaxation_step
 class TestHierarchicalRelaxationStep:
     def test_output_shapes_match_input(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
-        new_reps, new_errors, new_pred_w, new_skip_w = hierarchical_relaxation_step(
+        new_reps, new_errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
             grid.representations,
             grid.prediction_weights,
             grid.skip_weights,
@@ -23,7 +23,7 @@ class TestHierarchicalRelaxationStep:
 
     def test_error_shapes(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
-        _, errors, _, _ = hierarchical_relaxation_step(
+        _, errors, _, _, _ = hierarchical_relaxation_step(
             grid.representations,
             grid.prediction_weights,
             grid.skip_weights,
@@ -38,7 +38,7 @@ class TestHierarchicalRelaxationStep:
     def test_all_outputs_finite(self):
         grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
         reps = [jnp.ones(s) * 0.5 for s in grid.layer_sizes]
-        new_reps, new_errors, new_pred_w, new_skip_w = hierarchical_relaxation_step(
+        new_reps, new_errors, new_pred_w, new_skip_w, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -61,10 +61,11 @@ class TestHierarchicalRelaxationStep:
         errors_over_time = []
         pred_w = grid.prediction_weights
         skip_w = grid.skip_weights
+        temp_w = grid.temporal_weights
         for step in range(20):
-            reps, errors, pred_w, skip_w = hierarchical_relaxation_step(
+            reps, errors, pred_w, skip_w, temp_w = hierarchical_relaxation_step(
                 reps, pred_w, skip_w,
-                grid.temporal_weights, grid.temporal_state,
+                temp_w, grid.temporal_state,
                 grid.layer_sizes,
                 lr=0.01, lr_w=0.001, lambda_sparse=0.0,
             )
@@ -80,7 +81,7 @@ class TestHierarchicalRelaxationStep:
         reps = list(grid.representations)
         reps[0] = clamp_val
 
-        new_reps, _, _, _ = hierarchical_relaxation_step(
+        new_reps, _, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -99,7 +100,7 @@ class TestHierarchicalRelaxationStep:
                 for i, s in enumerate(grid.layer_sizes)]
         old_w = [w.copy() for w in grid.prediction_weights]
 
-        _, _, new_pred_w, _ = hierarchical_relaxation_step(
+        _, _, new_pred_w, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -118,7 +119,7 @@ class TestHierarchicalRelaxationStep:
                 for i, s in enumerate(grid.layer_sizes)]
         old_skip = [w.copy() for w in grid.skip_weights]
 
-        _, _, _, new_skip_w = hierarchical_relaxation_step(
+        _, _, _, new_skip_w, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -136,7 +137,7 @@ class TestHierarchicalRelaxationStep:
         reps = [jax.random.normal(jax.random.PRNGKey(i), (s,)) * 0.1
                 for i, s in enumerate(grid.layer_sizes)]
 
-        new_reps, errors, _, _ = hierarchical_relaxation_step(
+        new_reps, errors, _, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -154,7 +155,7 @@ class TestHierarchicalRelaxationStep:
         # Create large representations to generate large gradients
         reps = [jnp.ones(s) * 10.0 for s in grid.layer_sizes]
 
-        _, _, new_pred_w, _ = hierarchical_relaxation_step(
+        _, _, new_pred_w, _, _ = hierarchical_relaxation_step(
             reps,
             grid.prediction_weights,
             grid.skip_weights,
@@ -166,5 +167,27 @@ class TestHierarchicalRelaxationStep:
         for w in new_pred_w:
             frob = float(jnp.sqrt(jnp.sum(w ** 2)))
             min_dim = min(w.shape)
-            # After normalization, Frobenius/sqrt(min_dim) should be <= 1
-            assert frob / (min_dim ** 0.5) <= 1.0 + 1e-5
+            # After normalization, Frobenius/sqrt(min_dim) should be <= 2.0
+            assert frob / (min_dim ** 0.5) <= 2.0 + 1e-5
+
+    def test_temporal_weights_change(self):
+        """Temporal weights should update when there's temporal prediction error."""
+        grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
+        reps = [jax.random.normal(jax.random.PRNGKey(i), (s,))
+                for i, s in enumerate(grid.layer_sizes)]
+        # Set non-zero temporal state to generate temporal errors
+        temp_s = [jax.random.normal(jax.random.PRNGKey(i + 10), (s,)) * 0.5
+                  for i, s in enumerate(grid.layer_sizes)]
+        old_temp = [w.copy() for w in grid.temporal_weights]
+
+        _, _, _, _, new_temp_w = hierarchical_relaxation_step(
+            reps,
+            grid.prediction_weights,
+            grid.skip_weights,
+            grid.temporal_weights,
+            temp_s,
+            grid.layer_sizes,
+            lr=0.01, lr_w=0.01, lambda_sparse=0.0,
+        )
+        for old, new in zip(old_temp, new_temp_w):
+            assert not jnp.allclose(old, new)

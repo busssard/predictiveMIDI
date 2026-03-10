@@ -71,38 +71,45 @@ def create_hierarchical_grid(
 
     num_layers = len(layer_sizes)
 
-    representations = [jnp.zeros(s) for s in layer_sizes]
+    # Small noise init for representations (breaks symmetry)
+    representations = []
+    for s in layer_sizes:
+        key, subkey = jax.random.split(key)
+        representations.append(jax.random.normal(subkey, (s,)) * 0.01)
     errors = [jnp.zeros(s) for s in layer_sizes]
     temporal_state = [jnp.zeros(s) for s in layer_sizes]
 
     # Prediction weights: W_pred[i] has shape (layer_sizes[i], layer_sizes[i+1])
     # Layer i+1 predicts layer i via: pred_i = tanh(W_pred[i] @ x[i+1])
+    # Xavier initialization: sqrt(2 / (fan_in + fan_out))
     prediction_weights = []
     for i in range(num_layers - 1):
         key, subkey = jax.random.split(key)
         h_low, h_high = layer_sizes[i], layer_sizes[i + 1]
-        scale = 0.1 / jnp.sqrt(float(h_high))
+        scale = jnp.sqrt(2.0 / (h_low + h_high))
         w = jax.random.normal(subkey, (h_low, h_high)) * scale
         prediction_weights.append(w)
 
     # Skip connections: encoder layer i → decoder layer (N-1-i)
     # Number of skip pairs = floor(num_layers / 2)
+    # Same Xavier scale as prediction weights — skip connections are critical
     skip_weights = []
     n_skip = num_layers // 2
     for i in range(n_skip):
         j = num_layers - 1 - i
         key, subkey = jax.random.split(key)
         h_enc, h_dec = layer_sizes[i], layer_sizes[j]
-        scale = 0.01 / jnp.sqrt(float(h_enc))
+        scale = jnp.sqrt(2.0 / (h_enc + h_dec))
         w = jax.random.normal(subkey, (h_dec, h_enc)) * scale
         skip_weights.append(w)
 
     # Temporal weights: predict current tick from previous tick, per layer
+    # Smaller than spatial weights (temporal is auxiliary)
     temporal_weights = []
     for i in range(num_layers):
         key, subkey = jax.random.split(key)
         s = layer_sizes[i]
-        scale = 0.1 / jnp.sqrt(float(s))
+        scale = jnp.sqrt(1.0 / s)  # smaller than Xavier but non-trivial
         w = jax.random.normal(subkey, (s, s)) * scale
         temporal_weights.append(w)
 
