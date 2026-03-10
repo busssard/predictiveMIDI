@@ -7,6 +7,7 @@ Tests:
 4. Temporal coherence: how much output changes across ticks
 5. Output diversity: number of unique pitch patterns produced
 """
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,9 @@ import jax.numpy as jnp
 from django.core.management.base import BaseCommand
 
 from training.engine.inference import load_checkpoint, run_inference
+from training.engine.hierarchical_inference import (
+    load_hierarchical_checkpoint, run_hierarchical_inference,
+)
 from training.engine.update_rule import ACTIVATIONS
 
 
@@ -33,6 +37,105 @@ class Command(BaseCommand):
         checkpoint_path = options["checkpoint"]
         relax_steps = options["relaxation_steps"]
 
+        # Detect architecture
+        meta_path = Path(checkpoint_path) / "metadata.json"
+        raw_meta = json.loads(meta_path.read_text())
+        is_hierarchical = raw_meta.get("architecture") == "hierarchical"
+
+        output_dir = options.get("output_dir")
+        if output_dir is None:
+            output_dir = str(Path(checkpoint_path) / "diagnostics")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        if is_hierarchical:
+            self._handle_hierarchical(checkpoint_path, relax_steps, output_dir)
+        else:
+            self._handle_flat(checkpoint_path, relax_steps, output_dir)
+
+        self.stdout.write(f"\nDiagnostic plots saved to: {output_dir}")
+
+    def _handle_hierarchical(self, checkpoint_path, relax_steps, output_dir):
+        """Diagnose a hierarchical PC grid."""
+        self.stdout.write(f"Loading hierarchical checkpoint from {checkpoint_path}...")
+        grid, metadata = load_hierarchical_checkpoint(checkpoint_path)
+        vocabulary = metadata.get("vocabulary", {})
+        layer_sizes = metadata["layer_sizes"]
+
+        self.stdout.write(f"Architecture: hierarchical, layers={layer_sizes}")
+
+        # ── Test 1: Signal Propagation ──
+        self.stdout.write("\n=== Test 1: Signal Propagation ===")
+        test_pitches = [36, 48, 60, 72, 84]
+        for pitch in test_pitches:
+            T = 8
+            input_seq = np.zeros((T, 128), dtype=np.float32)
+            input_seq[:, pitch] = 1.0
+            cond = np.zeros(len(vocabulary), dtype=np.float32)
+            if "piano" in vocabulary:
+                cond[vocabulary["piano"]] = 1.0
+
+            output, layer_states = run_hierarchical_inference(
+                grid, input_seq, cond, relaxation_steps=relax_steps)
+
+            layer_acts = [float(np.abs(s).mean()) for s in layer_states]
+            output_max = float(output[-1].max())
+            prop_ratio = layer_acts[-1] / max(layer_acts[0], 1e-8)
+
+            self.stdout.write(
+                f"  Pitch {pitch:3d}: propagation={prop_ratio:.4f}, "
+                f"output_max={output_max:.4f}, "
+                f"layer_act={[f'{a:.4f}' for a in layer_acts]}")
+
+        # ── Test 2: Weight Analysis ──
+        self.stdout.write("\n=== Test 2: Weight Analysis ===")
+        for i, w in enumerate(grid.prediction_weights):
+            w_np = np.array(w)
+            frob = float(np.sqrt(np.sum(w_np ** 2)))
+            self.stdout.write(
+                f"  pred_weight[{i}] ({w_np.shape}): "
+                f"mean={w_np.mean():.6f}, std={w_np.std():.6f}, "
+                f"frobenius={frob:.4f}")
+        for i, w in enumerate(grid.skip_weights):
+            w_np = np.array(w)
+            self.stdout.write(
+                f"  skip_weight[{i}] ({w_np.shape}): "
+                f"mean={w_np.mean():.6f}, std={w_np.std():.6f}")
+
+        # ── Test 3: Temporal Coherence ──
+        self.stdout.write("\n=== Test 3: Temporal Coherence ===")
+        T = 32
+        input_seq = np.zeros((T, 128), dtype=np.float32)
+        for t in range(T):
+            if t % 4 < 2:
+                input_seq[t, 60] = 1.0
+            else:
+                input_seq[t, 64] = 1.0
+
+        cond = np.zeros(len(vocabulary), dtype=np.float32)
+        if "piano" in vocabulary:
+            cond[vocabulary["piano"]] = 1.0
+
+        output, _ = run_hierarchical_inference(
+            grid, input_seq, cond, relaxation_steps=relax_steps)
+
+        output_binary = (output > 0.5).astype(np.float32)
+        if T > 1:
+            diffs = np.abs(output_binary[1:] - output_binary[:-1]).mean(axis=1)
+            autocorr = 1.0 - float(diffs.mean())
+        else:
+            autocorr = 1.0
+
+        patterns = set()
+        for t in range(T):
+            pattern = tuple(np.nonzero(output_binary[t])[0])
+            patterns.add(pattern)
+
+        self.stdout.write(f"  Temporal autocorrelation: {autocorr:.4f}")
+        self.stdout.write(f"  Unique output patterns: {len(patterns)}/{T}")
+        self.stdout.write(f"  Mean notes per tick: {output_binary.sum(axis=1).mean():.1f}")
+
+    def _handle_flat(self, checkpoint_path, relax_steps, output_dir):
+        """Diagnose a flat PC grid (original architecture)."""
         self.stdout.write(f"Loading checkpoint from {checkpoint_path}...")
         grid, metadata = load_checkpoint(checkpoint_path)
         vocabulary = metadata.get("vocabulary", {})
@@ -41,32 +144,20 @@ class Command(BaseCommand):
         self.stdout.write(f"Grid: {H}x{W}, activation={metadata.get('activation')}, "
                           f"connectivity={metadata.get('connectivity')}")
 
-        output_dir = options.get("output_dir")
-        if output_dir is None:
-            output_dir = str(Path(checkpoint_path) / "diagnostics")
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-        # ── Test 1: Signal Propagation ──
         self.stdout.write("\n=== Test 1: Signal Propagation ===")
         self._test_signal_propagation(grid, metadata, H, W, relax_steps, output_dir)
 
-        # ── Test 2: Weight Analysis ──
         self.stdout.write("\n=== Test 2: Weight Analysis ===")
         self._test_weights(grid, H, W, output_dir)
 
-        # ── Test 3: Column Energy Profile ──
         self.stdout.write("\n=== Test 3: Column Energy Profile ===")
         self._test_column_energy(grid, H, W)
 
-        # ── Test 4: Temporal Coherence ──
         self.stdout.write("\n=== Test 4: Temporal Coherence ===")
         self._test_temporal_coherence(grid, metadata, vocabulary, relax_steps, output_dir)
 
-        # ── Test 5: Precision Analysis ──
         self.stdout.write("\n=== Test 5: Precision Analysis ===")
         self._test_precision(grid, H, W)
-
-        self.stdout.write(f"\nDiagnostic plots saved to: {output_dir}")
 
     def _test_signal_propagation(self, grid, metadata, H, W, relax_steps, output_dir):
         """Clamp single notes at different pitches, measure how far signal reaches."""
