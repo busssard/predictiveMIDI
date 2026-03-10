@@ -204,6 +204,11 @@ class HierarchicalTrainer:
             input_with_cond = inp + jnp.array(cond)
             input_with_cond = jnp.clip(input_with_cond, 0.0, 1.0)
 
+            # Convert target to logit space for output clamping:
+            # sigmoid(3.0) ≈ 0.95, sigmoid(-3.0) ≈ 0.05
+            # This gives the representations a meaningful dynamic range
+            tgt_logit = jnp.where(tgt > 0.5, 3.0, -3.0)
+
             # Teacher forcing: clamp output on some ticks
             do_clamp_output = self._rng.random() < self.teacher_forcing_ratio
 
@@ -213,7 +218,7 @@ class HierarchicalTrainer:
             for step in range(self.relaxation_steps):
                 reps, errors, pred_w, skip_w, temp_w = self._jit_step(
                     reps, pred_w, skip_w, temp_w, temp_s,
-                    input_with_cond, tgt,
+                    input_with_cond, tgt_logit,
                     do_clamp_0, do_clamp_last,
                 )
 
