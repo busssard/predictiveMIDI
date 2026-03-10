@@ -11,8 +11,13 @@ import numpy as np
 import pretty_midi
 from django.core.management.base import BaseCommand
 
+import json
+
 from corpus.services.vocabulary import categorize_instrument
 from training.engine.inference import load_checkpoint, run_inference
+from training.engine.hierarchical_inference import (
+    load_hierarchical_checkpoint, run_hierarchical_inference,
+)
 
 
 class Command(BaseCommand):
@@ -47,13 +52,23 @@ class Command(BaseCommand):
         fs = options["fs"]
         velocity = options["velocity"]
 
+        # Detect architecture from metadata
+        meta_path = Path(checkpoint_path) / "metadata.json"
+        raw_meta = json.loads(meta_path.read_text())
+        is_hierarchical = raw_meta.get("architecture") == "hierarchical"
+
         # Load checkpoint
         self.stdout.write(f"Loading checkpoint from {checkpoint_path}...")
-        grid, metadata = load_checkpoint(checkpoint_path)
-        vocabulary = metadata.get("vocabulary", {})
-        self.stdout.write(f"  Grid: {metadata['grid_height']}x{metadata['grid_width']}, "
-                          f"activation={metadata.get('activation')}, "
-                          f"connectivity={metadata.get('connectivity')}")
+        if is_hierarchical:
+            grid, metadata = load_hierarchical_checkpoint(checkpoint_path)
+            vocabulary = metadata.get("vocabulary", {})
+            self.stdout.write(f"  Architecture: hierarchical, layers={metadata['layer_sizes']}")
+        else:
+            grid, metadata = load_checkpoint(checkpoint_path)
+            vocabulary = metadata.get("vocabulary", {})
+            self.stdout.write(f"  Grid: {metadata['grid_height']}x{metadata['grid_width']}, "
+                              f"activation={metadata.get('activation')}, "
+                              f"connectivity={metadata.get('connectivity')}")
         self.stdout.write(f"  Vocabulary: {list(vocabulary.keys())}")
 
         # Load input MIDI
@@ -98,10 +113,16 @@ class Command(BaseCommand):
         # Run inference
         self.stdout.write(f"Running inference ({input_seq.shape[0]} ticks, "
                           f"{relax_steps} relaxation steps)...")
-        output_seq, all_states = run_inference(
-            grid, metadata, input_seq, cond,
-            relaxation_steps=relax_steps,
-        )
+        if is_hierarchical:
+            output_seq, all_states = run_hierarchical_inference(
+                grid, input_seq, cond,
+                relaxation_steps=relax_steps,
+            )
+        else:
+            output_seq, all_states = run_inference(
+                grid, metadata, input_seq, cond,
+                relaxation_steps=relax_steps,
+            )
         self.stdout.write(f"  Output shape: {output_seq.shape}")
 
         # Analyze output
@@ -131,15 +152,24 @@ class Command(BaseCommand):
 
         # Signal propagation analysis
         self.stdout.write(f"\n--- Signal Propagation ---")
-        mean_act_per_col = np.abs(all_states[:, :, :, 0]).mean(axis=(0, 1))
-        mean_err_per_col = np.abs(all_states[:, :, :, 1]).mean(axis=(0, 1))
-        self.stdout.write(f"  Mean |activation| per column: "
-                          f"{', '.join(f'c{i}={v:.4f}' for i, v in enumerate(mean_act_per_col))}")
-        self.stdout.write(f"  Mean |error| per column: "
-                          f"{', '.join(f'c{i}={v:.4f}' for i, v in enumerate(mean_err_per_col))}")
-
-        prop_ratio = mean_act_per_col[-1] / max(mean_act_per_col[0], 1e-8)
-        self.stdout.write(f"  Signal propagation ratio (col_last/col_0): {prop_ratio:.6f}")
+        if is_hierarchical:
+            # all_states is list of (T, H_l) per layer
+            for i, layer_states in enumerate(all_states):
+                mean_act = float(np.abs(layer_states).mean())
+                self.stdout.write(f"  Layer {i} (size={layer_states.shape[1]}): "
+                                  f"mean |activation|={mean_act:.4f}")
+            prop_ratio = (np.abs(all_states[-1]).mean() /
+                          max(np.abs(all_states[0]).mean(), 1e-8))
+            self.stdout.write(f"  Signal propagation ratio (output/input): {prop_ratio:.6f}")
+        else:
+            mean_act_per_col = np.abs(all_states[:, :, :, 0]).mean(axis=(0, 1))
+            mean_err_per_col = np.abs(all_states[:, :, :, 1]).mean(axis=(0, 1))
+            self.stdout.write(f"  Mean |activation| per column: "
+                              f"{', '.join(f'c{i}={v:.4f}' for i, v in enumerate(mean_act_per_col))}")
+            self.stdout.write(f"  Mean |error| per column: "
+                              f"{', '.join(f'c{i}={v:.4f}' for i, v in enumerate(mean_err_per_col))}")
+            prop_ratio = mean_act_per_col[-1] / max(mean_act_per_col[0], 1e-8)
+            self.stdout.write(f"  Signal propagation ratio (col_last/col_0): {prop_ratio:.6f}")
 
         # Convert output to MIDI
         output_midi = _piano_roll_to_midi(output_binary, fs=fs, velocity=velocity,
