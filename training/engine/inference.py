@@ -81,7 +81,17 @@ def load_checkpoint(checkpoint_path):
 def _make_inference_fn(relaxation_steps, activation_fn, use_fc=False,
                        use_fc_skip=False, use_w_temporal=False,
                        lambda_sparse=0.01, spike_boost=0.0):
-    """Build a JIT-compiled inference function (no output clamping)."""
+    """Build a JIT-compiled inference function (no output clamping).
+
+    Key differences from training:
+    - Output column is NOT clamped — it evolves freely
+    - Learned precision is RESET at output column to prevent divergence
+      (during training, output clamping kept things stable; without it,
+       high precision amplifies unbounded errors → NaN)
+    - No weight updates (lr_w=0), no precision learning (lr_precision=0)
+    - No FISTA momentum (r_prev=None equivalent via step_index=0)
+    - Representation values are clipped to [-5, 5] for stability
+    """
 
     @jax.jit
     def infer_fn(state, weights, params, log_precision,
@@ -111,47 +121,57 @@ def _make_inference_fn(relaxation_steps, activation_fn, use_fc=False,
 
         H, W = state.shape[0], state.shape[1]
 
-        # Precision: only boost input boundary (no output boosting)
-        # Use mild uniform precision since output is free
-        base_precision = jnp.ones((H, W))
+        # Reset learned precision: use flat precision=1.0 everywhere
+        # The trained log_precision was learned with output clamping;
+        # using it during free inference causes divergence at boundaries.
+        inference_log_precision = jnp.zeros((H, W))
+
+        # Reduce representation learning rate for stability
+        # (keep alpha/beta/bias from params, but lower lr)
+        inference_params = params.at[:, :, 2].set(params[:, :, 2] * 0.5)
 
         def process_tick(carry, inp):
             st, wt, lp, fcw, fcsw, wt_temp = carry
 
-            # Boost input boundary precision for active notes
-            precision = base_precision.at[:, 0].set(
-                jnp.where(inp != 0.0, 20.0, 1.0))
+            # External precision: only boost input boundary
+            precision = jnp.ones((H, W))
+            precision = precision.at[:, 0].set(
+                jnp.where(inp != 0.0, 10.0, 1.0))
 
             step_indices = jnp.arange(relaxation_steps)
 
             def relax_step(carry, step_idx):
-                s, w, log_p, r_prev, fc_w, fc_sw, w_t = carry
+                s, w, log_p, fc_w, fc_sw, w_t = carry
                 (s, w, new_log_p,
                  new_fc_w, new_fc_sw, new_w_t) = pc_relaxation_step(
-                    s, w, params, activation_fn,
+                    s, w, inference_params, activation_fn,
                     precision=precision, lambda_sparse=lambda_sparse,
-                    log_precision=log_p, lr_precision=0.0,  # no precision learning during inference
+                    log_precision=log_p, lr_precision=0.0,
                     fc_weights=fc_w, fc_skip_weights=fc_sw,
-                    lr_w=0.0,  # no weight learning during inference
-                    step_index=step_idx, r_prev=r_prev,
-                    spike_boost=spike_boost, w_temporal=w_t,
+                    lr_w=0.0,
+                    step_index=0,  # constant 0 disables FISTA momentum
+                    r_prev=None,   # no FISTA
+                    spike_boost=0.0,  # no spike boost during inference
+                    w_temporal=w_t,
                 )
                 # Only clamp input, NOT output
                 s = apply_clamping(s, input_mask, inp, channel=0)
                 s = apply_clamping(s, conditioning_mask, cond_vals, channel=0)
 
-                new_r_prev = s[:, :, 0]
+                # Clip representations to prevent divergence
+                r_clipped = jnp.clip(s[:, :, 0], -5.0, 5.0)
+                s = s.at[:, :, 0].set(r_clipped)
+
                 out_fc_w = new_fc_w if use_fc else fc_w
                 out_fc_sw = new_fc_sw if use_fc_skip else fc_sw
                 out_w_t = new_w_t if use_w_temporal else w_t
 
-                return (s, w, new_log_p, new_r_prev,
+                return (s, w, new_log_p,
                         out_fc_w, out_fc_sw, out_w_t), None
 
-            r_prev_init = st[:, :, 0]
-            (new_st, new_wt, new_lp, _, new_fcw, new_fcsw, new_wt_temp), _ = lax.scan(
+            (new_st, new_wt, new_lp, new_fcw, new_fcsw, new_wt_temp), _ = lax.scan(
                 relax_step,
-                (st, wt, lp, r_prev_init, fcw, fcsw, wt_temp),
+                (st, wt, lp, fcw, fcsw, wt_temp),
                 step_indices,
             )
 
@@ -160,7 +180,7 @@ def _make_inference_fn(relaxation_steps, activation_fn, use_fc=False,
 
             return (new_st, new_wt, new_lp, new_fcw, new_fcsw, new_wt_temp), (output, new_st)
 
-        init_carry = (state, weights, log_precision,
+        init_carry = (state, weights, inference_log_precision,
                       _fc_w, _fc_sw, _w_t)
         (final_state, final_wt, final_lp, _, _, _), (output_seq, all_states) = lax.scan(
             process_tick, init_carry, input_seq)
