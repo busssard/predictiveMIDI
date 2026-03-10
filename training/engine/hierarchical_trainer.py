@@ -23,17 +23,20 @@ from corpus.services.curriculum import CurriculumScheduler
 def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
     """Create a JIT-compiled relaxation step for fixed layer structure.
 
-    Hyperparameters (lr, lr_w, lam) are closed over as constants —
-    they're Python floats at trace time, not JAX tracers.
+    Hyperparameters (lr, lr_w, lam) are closed over as constants.
+    output_supervision is a runtime parameter to support annealing.
     """
 
     @jax.jit
     def jit_step(reps, pred_w, skip_w, temp_w, temp_s,
-                 clamp_0, clamp_last, do_clamp_0, do_clamp_last):
-        """JIT-friendly relaxation step with optional clamping."""
+                 clamp_0, clamp_last, do_clamp_0, do_clamp_last,
+                 output_target, sup_strength):
+        """JIT-friendly relaxation step with optional clamping + supervision."""
         new_reps, errors, new_pred_w, new_skip_w, new_temp_w = hierarchical_relaxation_step(
             reps, pred_w, skip_w, temp_w, temp_s,
             layer_sizes, lr, lr_w, lam,
+            output_target=output_target,
+            output_supervision=sup_strength,
         )
 
         # Apply clamping post-hoc (always compute both, conditionally apply)
@@ -53,7 +56,9 @@ class HierarchicalTrainer:
                  lr=0.01, lr_w=0.001, alpha=0.8, lambda_sparse=0.005,
                  curriculum_phases=None, curriculum_patience=10,
                  teacher_forcing_ratio=1.0,
-                 tf_min=0.0, tf_anneal_steps=0):
+                 tf_min=0.0, tf_anneal_steps=0,
+                 output_supervision=0.0,
+                 sup_min=0.0, sup_anneal_steps=0):
         """Initialize hierarchical PC trainer.
 
         Args:
@@ -63,6 +68,9 @@ class HierarchicalTrainer:
             fs: sampling rate (ticks per second).
             key: JAX PRNG key.
             teacher_forcing_ratio: fraction of ticks where output is clamped (1.0=always).
+            output_supervision: strength of soft target signal at output layer (0=none).
+            sup_min: minimum supervision after annealing.
+            sup_anneal_steps: steps to anneal supervision from initial to min (0=no annealing).
         """
         if layer_sizes is None:
             layer_sizes = [128, 64, 32, 64, 128]
@@ -105,8 +113,13 @@ class HierarchicalTrainer:
             lambda_sparse=lambda_sparse,
         )
 
+        self.output_supervision = output_supervision
+        self._sup_initial = output_supervision
+        self._sup_min = sup_min
+        self._sup_anneal_steps = sup_anneal_steps
         self._rng = np.random.default_rng(42)
-        self._jit_step = _make_jit_relax_step(layer_sizes, lr, lr_w, lambda_sparse)
+        self._jit_step = _make_jit_relax_step(
+            layer_sizes, lr, lr_w, lambda_sparse)
 
     def _build_conditioning(self, cond_raw):
         """Expand conditioning vector (num_cat,) to input layer size (H_input,)."""
@@ -124,12 +137,17 @@ class HierarchicalTrainer:
             avg_error: float
             meta: dict with metrics
         """
-        # Anneal teacher forcing ratio
+        # Anneal teacher forcing ratio and output supervision
         self._step_count += 1
         if self._tf_anneal_steps > 0:
             progress = min(self._step_count / self._tf_anneal_steps, 1.0)
             self.teacher_forcing_ratio = (
                 self._tf_initial * (1.0 - progress) + self._tf_min * progress
+            )
+        if self._sup_anneal_steps > 0:
+            progress = min(self._step_count / self._sup_anneal_steps, 1.0)
+            self.output_supervision = (
+                self._sup_initial * (1.0 - progress) + self._sup_min * progress
             )
 
         self._batch_source.snippet_ticks = self.curriculum.snippet_ticks
@@ -229,11 +247,13 @@ class HierarchicalTrainer:
             # Relaxation loop (JIT-compiled inner step)
             do_clamp_0 = jnp.bool_(True)
             do_clamp_last = jnp.bool_(do_clamp_output)
+            sup = jnp.float32(self.output_supervision)
             for step in range(self.relaxation_steps):
                 reps, errors, pred_w, skip_w, temp_w = self._jit_step(
                     reps, pred_w, skip_w, temp_w, temp_s,
                     input_with_cond, tgt_logit,
                     do_clamp_0, do_clamp_last,
+                    tgt_logit, sup,
                 )
 
             # Compute error at output layer

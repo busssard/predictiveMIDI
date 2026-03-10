@@ -25,8 +25,11 @@ def hierarchical_relaxation_step(
     lr_w: float = 0.001,
     lambda_sparse: float = 0.005,
     clamp_mask: Optional[Dict[int, jnp.ndarray]] = None,
+    output_target: Optional[jnp.ndarray] = None,
+    output_supervision: float = 0.0,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray],
-           List[jnp.ndarray], List[jnp.ndarray]]:
+           List[jnp.ndarray], List[jnp.ndarray],
+           List[jnp.ndarray]]:
     """One relaxation step of the hierarchical PC network.
 
     Args:
@@ -40,9 +43,12 @@ def hierarchical_relaxation_step(
         lr_w: weight learning rate
         lambda_sparse: L1 sparsity penalty
         clamp_mask: dict {layer_idx: clamp_values} — layers to hold fixed
+        output_target: optional (H_output,) logit-space target for output layer
+        output_supervision: strength of output supervision (0=none, 1=strong)
 
     Returns:
-        new_representations, new_errors, new_prediction_weights, new_skip_weights
+        new_representations, new_errors, new_prediction_weights,
+        new_skip_weights, new_temporal_weights
     """
     if clamp_mask is None:
         clamp_mask = {}
@@ -95,6 +101,12 @@ def hierarchical_relaxation_step(
         if i > 0:
             tanh_deriv = 1.0 - jnp.tanh(representations[i]) ** 2
             update = update + tanh_deriv * (prediction_weights[i - 1].T @ errors[i - 1])
+
+        # Output supervision: soft target signal at the output layer
+        # Drives the output toward the target logits without hard clamping
+        if i == num_layers - 1 and output_target is not None:
+            supervision_error = representations[i] - output_target
+            update = update - output_supervision * supervision_error
 
         # Sparsity penalty
         update = update - lambda_sparse * jnp.sign(representations[i])

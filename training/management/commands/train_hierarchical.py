@@ -4,6 +4,7 @@ Usage:
     python manage.py train_hierarchical --num-steps 250 --batch-size 16
     python manage.py train_hierarchical --layer-sizes 128 64 32 64 128 --teacher-forcing 0.8
 """
+import json
 import time
 from pathlib import Path
 from django.core.management.base import BaseCommand
@@ -41,6 +42,12 @@ class Command(BaseCommand):
                             help="Minimum teacher forcing after annealing (default: 0.0)")
         parser.add_argument("--tf-anneal-steps", type=int, default=0,
                             help="Steps to anneal TF from initial to min (0=no annealing)")
+        parser.add_argument("--output-supervision", type=float, default=0.0,
+                            help="Soft output target strength (0=none, 0.5=moderate)")
+        parser.add_argument("--sup-min", type=float, default=0.0,
+                            help="Minimum supervision after annealing")
+        parser.add_argument("--sup-anneal-steps", type=int, default=0,
+                            help="Steps to anneal supervision (0=no annealing)")
         parser.add_argument("--curriculum-patience", type=int, default=10)
         parser.add_argument("--phase-1-ticks", type=int, default=16)
         parser.add_argument("--phase-1-threshold", type=float, default=0.15)
@@ -85,6 +92,9 @@ class Command(BaseCommand):
             teacher_forcing_ratio=options["teacher_forcing"],
             tf_min=options["tf_min"],
             tf_anneal_steps=options["tf_anneal_steps"],
+            output_supervision=options["output_supervision"],
+            sup_min=options["sup_min"],
+            sup_anneal_steps=options["sup_anneal_steps"],
             curriculum_phases=curriculum_phases,
             curriculum_patience=options["curriculum_patience"],
             prefetch=True,
@@ -120,6 +130,9 @@ class Command(BaseCommand):
             },
         )
 
+        heartbeat_path = Path(ckpt_dir) / "heartbeat.json"
+        heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
             for step in range(1, options["num_steps"] + 1):
                 t0 = time.time()
@@ -142,15 +155,29 @@ class Command(BaseCommand):
                 run.save()
 
                 tf_now = meta.get("teacher_forcing", options["teacher_forcing"])
-                self.stdout.write(
+                sup_now = trainer.output_supervision
+                status_line = (
                     f"Step {step}/{options['num_steps']} | "
                     f"Error: {avg_error:.6f} | "
                     f"Active: {active_err:.6f} | "
                     f"F1: {f1:.3f} (P:{prec:.3f} R:{rec:.3f}) | "
                     f"Phase: {trainer.curriculum.current_phase} | "
                     f"TF: {tf_now:.2f} | "
+                    f"Sup: {sup_now:.2f} | "
                     f"Time: {dt:.1f}s"
                 )
+                self.stdout.write(status_line)
+
+                # Write heartbeat for external monitoring
+                heartbeat_path.write_text(json.dumps({
+                    "step": step,
+                    "total_steps": options["num_steps"],
+                    "error": round(avg_error, 6),
+                    "f1": round(f1, 3),
+                    "phase": trainer.curriculum.current_phase,
+                    "time_per_step": round(dt, 1),
+                    "timestamp": time.time(),
+                }))
 
                 if step % options["checkpoint_every"] == 0:
                     ckpt_path = f"{ckpt_dir}/step_{step}"

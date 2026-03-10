@@ -191,3 +191,26 @@ class TestHierarchicalRelaxationStep:
         )
         for old, new in zip(old_temp, new_temp_w):
             assert not jnp.allclose(old, new)
+
+    def test_output_supervision_pulls_toward_target(self):
+        """Output supervision should move output layer toward the target."""
+        grid = create_hierarchical_grid(layer_sizes=[16, 8, 16])
+        reps = [jnp.zeros(s) for s in grid.layer_sizes]
+        target = jnp.ones(16) * 3.0  # strong positive target
+
+        # Without supervision
+        new_reps_no_sup, _, _, _, _ = hierarchical_relaxation_step(
+            reps, grid.prediction_weights, grid.skip_weights,
+            grid.temporal_weights, grid.temporal_state, grid.layer_sizes,
+            output_target=target, output_supervision=0.0,
+        )
+        # With supervision
+        new_reps_sup, _, _, _, _ = hierarchical_relaxation_step(
+            reps, grid.prediction_weights, grid.skip_weights,
+            grid.temporal_weights, grid.temporal_state, grid.layer_sizes,
+            output_target=target, output_supervision=1.0,
+        )
+        # Supervised output should be closer to target
+        dist_no = float(jnp.mean(jnp.abs(new_reps_no_sup[-1] - target)))
+        dist_sup = float(jnp.mean(jnp.abs(new_reps_sup[-1] - target)))
+        assert dist_sup < dist_no
