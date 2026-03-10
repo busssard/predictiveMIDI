@@ -50,6 +50,8 @@ class Command(BaseCommand):
         parser.add_argument("--phase-3-threshold", type=float, default=0.0)
         parser.add_argument("--checkpoint-dir", default=None,
                             help="Checkpoint directory (default: checkpoints_hierarchical/)")
+        parser.add_argument("--resume-from", default=None,
+                            help="Load weights from this checkpoint before training")
 
     def handle(self, *args, **options):
         index_path = options.get("index_path")
@@ -95,6 +97,12 @@ class Command(BaseCommand):
         else:
             self.stdout.write(f"Scanning {options['midi_dir']}...")
             trainer = HierarchicalTrainer(**trainer_kwargs)
+
+        # Resume from checkpoint if specified
+        if options.get("resume_from"):
+            resume_path = options["resume_from"]
+            self.stdout.write(f"Resuming from checkpoint: {resume_path}")
+            trainer.load_checkpoint(resume_path)
 
         self.stdout.write(f"Architecture: {options['layer_sizes']}")
         self.stdout.write(f"Teacher forcing: {options['teacher_forcing']}")
