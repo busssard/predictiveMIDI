@@ -63,6 +63,8 @@ class Command(BaseCommand):
                             help="Per-column lr scaling amplification (0.0=disabled)")
         parser.add_argument("--no-forward-init", action="store_true",
                             help="Disable forward initialization")
+        parser.add_argument("--metrics-dir", default=None,
+                            help="Directory for JSONL metrics log (default: same as checkpoint dir)")
 
     def handle(self, *args, **options):
         # Auto-detect corpus index (single file or split parts)
@@ -80,6 +82,8 @@ class Command(BaseCommand):
             2: {"snippet_ticks": options["phase_2_ticks"], "threshold": options["phase_2_threshold"]},
             3: {"snippet_ticks": options["phase_3_ticks"], "threshold": options["phase_3_threshold"]},
         }
+
+        metrics_dir = options.get("metrics_dir") or str(settings.CHECKPOINT_DIR)
 
         trainer_kwargs = dict(
             midi_dir=options["midi_dir"],
@@ -102,6 +106,7 @@ class Command(BaseCommand):
             activation=options["activation"],
             lr_amplification=options["lr_amplification"],
             forward_init=not options["no_forward_init"],
+            metrics_dir=metrics_dir,
         )
 
         if index_path:
@@ -127,7 +132,7 @@ class Command(BaseCommand):
         try:
             for step in range(1, options["num_steps"] + 1):
                 t0 = time.time()
-                avg_error, meta = trainer.train_step(batch_size=options["batch_size"])
+                avg_error, meta = trainer.train_step(batch_size=options["batch_size"], step=step)
                 dt = time.time() - t0
 
                 active_err = meta.get("active_error", 0.0) if isinstance(meta, dict) else 0.0
