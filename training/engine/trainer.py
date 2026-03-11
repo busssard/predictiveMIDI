@@ -9,6 +9,7 @@ from training.engine.grid import create_grid
 from training.engine.update_rule import pc_relaxation_step, apply_clamping, ACTIVATIONS
 from corpus.services.batch_generator import BatchGenerator
 from corpus.services.curriculum import CurriculumScheduler
+from training.engine.metrics_logger import MetricsLogger
 
 
 def _make_train_fn(relaxation_steps, activation_fn=None,
@@ -205,7 +206,8 @@ class Trainer:
                  connectivity="neighbor", lr_w=0.001,
                  state_momentum=0.9,
                  spike_boost=5.0, asl_gamma_neg=4.0, asl_margin=0.05,
-                 lr_amplification=0.0, forward_init=True):
+                 lr_amplification=0.0, forward_init=True,
+                 metrics_dir=None):
         # Support both old grid_size and new grid_width/grid_height
         self.grid_width = grid_width if grid_width is not None else grid_size
         self.grid_height = grid_height if grid_height is not None else grid_size
@@ -256,6 +258,8 @@ class Trainer:
             use_forward_init=forward_init,
         )
 
+        self._metrics_logger = MetricsLogger(metrics_dir) if metrics_dir else None
+
     def _get_fc_weights(self):
         """Return FC weights or a dummy array for JIT compatibility."""
         if self.grid.fc_weights is not None:
@@ -282,8 +286,12 @@ class Trainer:
         )
         return all_conds
 
-    def train_step(self, batch_size=32):
+    def train_step(self, batch_size=32, step=None):
         """Run one training step: generate batch, process on GPU.
+
+        Args:
+            batch_size: number of examples per batch
+            step: optional step number for metrics logging
 
         Returns:
             avg_error: float
@@ -343,7 +351,7 @@ class Trainer:
                 W - 1: float(ce[W - 1]),
             }
 
-        return avg_error, {
+        meta = {
             "datasets": batch.get("datasets", []),
             "active_error": avg_active,
             "col_energy": col_energy_sample,
@@ -351,6 +359,18 @@ class Trainer:
             "recall": recall,
             "f1": f1,
         }
+
+        if self._metrics_logger and step is not None:
+            self._metrics_logger.log_step(
+                step,
+                error=avg_error,
+                active_error=avg_active,
+                f1=f1,
+                precision=precision,
+                recall=recall,
+            )
+
+        return avg_error, meta
 
     def evaluate_error(self, batch_size=4):
         """Evaluate current error without updating weights."""

@@ -8,6 +8,47 @@ from corpus.tests.test_batch_generator import make_corpus
 from training.engine.trainer import Trainer
 
 
+class TestTrainerMetricsIntegration:
+    def test_trainer_logs_metrics_when_metrics_dir_set(self, tmp_path):
+        """Trainer should write JSONL metrics when metrics_dir is provided."""
+        midi_dir = tmp_path / "midi"
+        midi_dir.mkdir()
+        make_corpus(midi_dir)
+        metrics_dir = tmp_path / "metrics"
+        trainer = Trainer(
+            midi_dir=str(midi_dir),
+            grid_size=16,
+            relaxation_steps=5,
+            fs=8.0,
+            metrics_dir=str(metrics_dir),
+        )
+        trainer.train_step(batch_size=2, step=1)
+        trainer.train_step(batch_size=2, step=2)
+
+        from training.engine.metrics_logger import MetricsLogger
+        logger = MetricsLogger(str(metrics_dir))
+        metrics = logger.load_metrics()
+        assert len(metrics) == 2
+        assert metrics[0]["step"] == 1
+        assert metrics[1]["step"] == 2
+        assert "error" in metrics[0]
+        assert "f1" in metrics[0]
+        assert "precision" in metrics[0]
+        assert "recall" in metrics[0]
+
+    def test_trainer_no_metrics_without_dir(self, tmp_path):
+        """Trainer should not crash when metrics_dir is not provided."""
+        make_corpus(tmp_path)
+        trainer = Trainer(
+            midi_dir=str(tmp_path),
+            grid_size=16,
+            relaxation_steps=5,
+            fs=8.0,
+        )
+        error, meta = trainer.train_step(batch_size=2)
+        assert np.isfinite(error)
+
+
 class TestTrainer:
     def test_train_one_batch_produces_finite_error(self, tmp_path):
         make_corpus(tmp_path)
