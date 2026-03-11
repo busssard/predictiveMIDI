@@ -226,6 +226,39 @@ class CheckpointListView(APIView):
 class ExportCheckpointView(APIView):
     """POST to export a checkpoint as a WebGL model."""
 
+    @staticmethod
+    def _resolve_checkpoint_path(checkpoint):
+        """Resolve checkpoint name to absolute path.
+
+        Flat checkpoints live under CHECKPOINT_DIR (e.g. "step_10").
+        Hierarchical checkpoints use a relative path from BASE_DIR
+        (e.g. "checkpoints_hierarchical/step_50").
+        """
+        # Try as flat checkpoint first
+        flat_path = Path(settings.CHECKPOINT_DIR) / checkpoint
+        if flat_path.exists():
+            return flat_path
+        # Try as relative path from BASE_DIR (hierarchical)
+        hier_path = Path(settings.BASE_DIR) / checkpoint
+        if hier_path.exists():
+            return hier_path
+        return None
+
+    @staticmethod
+    def _detect_architecture(ckpt_path):
+        """Detect if a checkpoint is flat or hierarchical."""
+        meta_file = ckpt_path / "metadata.json"
+        if meta_file.exists():
+            try:
+                metadata = json.loads(meta_file.read_text())
+                if metadata.get("architecture") == "hierarchical":
+                    return "hierarchical"
+            except (json.JSONDecodeError, OSError):
+                pass
+        if (ckpt_path / "state.npy").exists():
+            return "flat"
+        return "unknown"
+
     def post(self, request):
         checkpoint = request.data.get("checkpoint")
         name = request.data.get("name")
@@ -236,54 +269,22 @@ class ExportCheckpointView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        ckpt_path = Path(settings.CHECKPOINT_DIR) / checkpoint
-        if not ckpt_path.exists():
+        ckpt_path = self._resolve_checkpoint_path(checkpoint)
+        if ckpt_path is None:
             return Response(
                 {"error": f"Checkpoint {checkpoint} not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        architecture = self._detect_architecture(ckpt_path)
+        export_dir = Path(settings.BASE_DIR) / "frontend" / "model" / name
+
         try:
-            import numpy as np
-            from training.engine.export import export_model
-            from training.engine.grid import GridState
-            import jax.numpy as jnp
-
-            state = jnp.array(np.load(ckpt_path / "state.npy"))
-            weights = jnp.array(np.load(ckpt_path / "weights.npy"))
-            params = jnp.array(np.load(ckpt_path / "params.npy"))
-
-            # Build a minimal GridState (masks not needed for export)
-            height, width = int(state.shape[0]), int(state.shape[1])
-            dummy_mask = jnp.zeros((height, width), dtype=bool)
-
-            # Load log_precision if present in checkpoint
-            lp_path = ckpt_path / "log_precision.npy"
-            if lp_path.exists():
-                log_precision = jnp.array(np.load(lp_path))
+            if architecture == "hierarchical":
+                from training.engine.export import export_hierarchical_model
+                export_hierarchical_model(str(ckpt_path), str(export_dir))
             else:
-                log_precision = jnp.zeros((height, width))
-
-            grid = GridState(
-                state=state, weights=weights, params=params,
-                log_precision=log_precision,
-                input_mask=dummy_mask, output_mask=dummy_mask,
-                conditioning_mask=dummy_mask,
-            )
-
-            # Load vocabulary from checkpoint metadata first, fall back to latest
-            vocab = {}
-            metadata_file = ckpt_path / "metadata.json"
-            if metadata_file.exists():
-                metadata = json.loads(metadata_file.read_text())
-                vocab = metadata.get("vocabulary", {})
-            if not vocab:
-                default_model = Path(settings.BASE_DIR) / "frontend" / "model" / "config.json"
-                if default_model.exists():
-                    vocab = json.loads(default_model.read_text()).get("vocabulary", {})
-
-            export_dir = Path(settings.BASE_DIR) / "frontend" / "model" / name
-            export_model(grid, vocab, str(export_dir))
+                self._export_flat(ckpt_path, export_dir)
 
             return Response({"status": "exported", "name": name})
         except Exception as e:
@@ -292,6 +293,47 @@ class ExportCheckpointView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @staticmethod
+    def _export_flat(ckpt_path, export_dir):
+        """Export a flat grid checkpoint."""
+        import numpy as np
+        from training.engine.export import export_model
+        from training.engine.grid import GridState
+        import jax.numpy as jnp
+
+        state = jnp.array(np.load(ckpt_path / "state.npy"))
+        weights = jnp.array(np.load(ckpt_path / "weights.npy"))
+        params = jnp.array(np.load(ckpt_path / "params.npy"))
+
+        height, width = int(state.shape[0]), int(state.shape[1])
+        dummy_mask = jnp.zeros((height, width), dtype=bool)
+
+        lp_path = ckpt_path / "log_precision.npy"
+        if lp_path.exists():
+            log_precision = jnp.array(np.load(lp_path))
+        else:
+            log_precision = jnp.zeros((height, width))
+
+        grid = GridState(
+            state=state, weights=weights, params=params,
+            log_precision=log_precision,
+            input_mask=dummy_mask, output_mask=dummy_mask,
+            conditioning_mask=dummy_mask,
+        )
+
+        # Load vocabulary from checkpoint metadata first, fall back to latest
+        vocab = {}
+        metadata_file = ckpt_path / "metadata.json"
+        if metadata_file.exists():
+            metadata = json.loads(metadata_file.read_text())
+            vocab = metadata.get("vocabulary", {})
+        if not vocab:
+            default_model = Path(settings.BASE_DIR) / "frontend" / "model" / "config.json"
+            if default_model.exists():
+                vocab = json.loads(default_model.read_text()).get("vocabulary", {})
+
+        export_model(grid, vocab, str(export_dir))
 
 
 class ModelListView(APIView):

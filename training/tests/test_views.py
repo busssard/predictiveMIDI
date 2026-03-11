@@ -1,5 +1,6 @@
 """Tests for training views: checkpoint listing and export with hierarchical support."""
 import json
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from django.test import RequestFactory
 from rest_framework.test import APIRequestFactory
 
 from training.views import CheckpointListView, ExportCheckpointView
+from training.engine.export import export_hierarchical_model
 
 
 @pytest.fixture
@@ -165,3 +167,106 @@ class TestCheckpointListView:
         assert len(hier_ckpts) > 0
         for c in hier_ckpts:
             assert c["layer_sizes"] == [128, 64, 32, 64, 128]
+
+
+class TestExportHierarchicalModel:
+    """Test the export_hierarchical_model function."""
+
+    def test_creates_weight_files(self, hierarchical_checkpoint, tmp_path):
+        """Export creates .bin files for each weight array."""
+        ckpt_path = hierarchical_checkpoint / "step_50"
+        output_dir = tmp_path / "export_out"
+        export_hierarchical_model(str(ckpt_path), str(output_dir))
+        assert (output_dir / "config.json").exists()
+        config = json.loads((output_dir / "config.json").read_text())
+        assert config["architecture"] == "hierarchical"
+        assert config["layer_sizes"] == [128, 64, 32, 64, 128]
+        # Check weight files exist
+        for i in range(4):  # 5 layers - 1 = 4 prediction weights
+            assert (output_dir / f"pred_weight_{i}.bin").exists()
+        for i in range(2):  # 5 // 2 = 2 skip weights
+            assert (output_dir / f"skip_weight_{i}.bin").exists()
+        for i in range(5):  # 5 temporal weights
+            assert (output_dir / f"temporal_weight_{i}.bin").exists()
+
+    def test_config_has_vocabulary(self, hierarchical_checkpoint, tmp_path):
+        """Exported config.json contains the vocabulary from metadata."""
+        ckpt_path = hierarchical_checkpoint / "step_50"
+        output_dir = tmp_path / "export_out"
+        export_hierarchical_model(str(ckpt_path), str(output_dir))
+        config = json.loads((output_dir / "config.json").read_text())
+        assert config["vocabulary"] == {"piano": 0, "drums": 1}
+
+    def test_weight_file_sizes(self, hierarchical_checkpoint, tmp_path):
+        """Weight .bin files have correct byte sizes (float32 = 4 bytes per element)."""
+        ckpt_path = hierarchical_checkpoint / "step_50"
+        output_dir = tmp_path / "export_out"
+        export_hierarchical_model(str(ckpt_path), str(output_dir))
+        # pred_weight_0: (128, 64) => 128*64*4 bytes
+        assert (output_dir / "pred_weight_0.bin").stat().st_size == 128 * 64 * 4
+        # skip_weight_0: (128, 128) => 128*128*4 bytes
+        assert (output_dir / "skip_weight_0.bin").stat().st_size == 128 * 128 * 4
+        # temporal_weight_0: (128, 128) => 128*128*4 bytes
+        assert (output_dir / "temporal_weight_0.bin").stat().st_size == 128 * 128 * 4
+
+    def test_creates_output_directory(self, hierarchical_checkpoint, tmp_path):
+        """export_hierarchical_model creates nested output dirs if needed."""
+        ckpt_path = hierarchical_checkpoint / "step_50"
+        output_dir = tmp_path / "nested" / "deep" / "export"
+        export_hierarchical_model(str(ckpt_path), str(output_dir))
+        assert (output_dir / "config.json").exists()
+
+
+@pytest.mark.django_db
+class TestExportCheckpointView:
+    """Test ExportCheckpointView handles both flat and hierarchical checkpoints."""
+
+    def test_export_flat_checkpoint(self, factory, flat_checkpoint, tmp_path):
+        """Exporting a flat checkpoint works as before."""
+        view = ExportCheckpointView.as_view()
+        request = factory.post(
+            "/api/training/export-checkpoint/",
+            {"checkpoint": "step_10", "name": "test_flat"},
+            format="json",
+        )
+        model_dir = tmp_path / "frontend" / "model"
+        with patch("training.views.settings") as mock_settings:
+            mock_settings.CHECKPOINT_DIR = str(flat_checkpoint)
+            mock_settings.BASE_DIR = tmp_path
+            response = view(request)
+        assert response.status_code == 200
+        assert response.data["status"] == "exported"
+
+    def test_export_hierarchical_checkpoint(self, factory, hierarchical_checkpoint, tmp_path):
+        """Exporting a hierarchical checkpoint uses the hierarchical export path."""
+        view = ExportCheckpointView.as_view()
+        request = factory.post(
+            "/api/training/export-checkpoint/",
+            {"checkpoint": "checkpoints_hierarchical/step_50", "name": "test_hier"},
+            format="json",
+        )
+        with patch("training.views.settings") as mock_settings:
+            mock_settings.CHECKPOINT_DIR = str(tmp_path / "checkpoints")
+            mock_settings.BASE_DIR = tmp_path
+            response = view(request)
+        assert response.status_code == 200
+        assert response.data["status"] == "exported"
+        # Verify hierarchical export files exist
+        export_dir = tmp_path / "frontend" / "model" / "test_hier"
+        assert (export_dir / "config.json").exists()
+        config = json.loads((export_dir / "config.json").read_text())
+        assert config["architecture"] == "hierarchical"
+
+    def test_export_missing_checkpoint_returns_404(self, factory, tmp_path):
+        """Requesting a non-existent checkpoint returns 404."""
+        view = ExportCheckpointView.as_view()
+        request = factory.post(
+            "/api/training/export-checkpoint/",
+            {"checkpoint": "step_999", "name": "nope"},
+            format="json",
+        )
+        with patch("training.views.settings") as mock_settings:
+            mock_settings.CHECKPOINT_DIR = str(tmp_path / "checkpoints")
+            mock_settings.BASE_DIR = tmp_path
+            response = view(request)
+        assert response.status_code == 404
