@@ -119,3 +119,40 @@ class TestHierarchicalTrainer:
         )
         error, _ = trainer.train_step(batch_size=2)
         assert np.isfinite(error)
+
+    def test_weight_update_hebbian(self, midi_corpus):
+        """Trainer accepts weight_update='hebbian' (default)."""
+        trainer = HierarchicalTrainer(
+            midi_dir=str(midi_corpus),
+            layer_sizes=[32, 16, 32],
+            relaxation_steps=5,
+            fs=4.0,
+            weight_update="hebbian",
+        )
+        assert trainer.weight_update == "hebbian"
+        error, _ = trainer.train_step(batch_size=2)
+        assert np.isfinite(error)
+
+    def test_weight_update_autodiff(self, midi_corpus):
+        """Trainer accepts weight_update='autodiff' and produces finite error."""
+        trainer = HierarchicalTrainer(
+            midi_dir=str(midi_corpus),
+            layer_sizes=[32, 16, 32],
+            relaxation_steps=5,
+            fs=4.0,
+            weight_update="autodiff",
+        )
+        assert trainer.weight_update == "autodiff"
+        error, _ = trainer.train_step(batch_size=2)
+        assert np.isfinite(error)
+
+    def test_weight_update_invalid_raises(self, midi_corpus):
+        """Trainer rejects invalid weight_update values."""
+        with pytest.raises(ValueError, match="weight_update"):
+            HierarchicalTrainer(
+                midi_dir=str(midi_corpus),
+                layer_sizes=[32, 16, 32],
+                relaxation_steps=5,
+                fs=4.0,
+                weight_update="invalid",
+            )

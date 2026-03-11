@@ -16,16 +16,28 @@ import numpy as np
 
 from training.engine.hierarchical_grid import HierarchicalGridState, create_hierarchical_grid
 from training.engine.hierarchical_update import hierarchical_relaxation_step
+from training.engine.hierarchical_update_autodiff import hierarchical_relaxation_step_autodiff
 from corpus.services.batch_generator import BatchGenerator
 from corpus.services.curriculum import CurriculumScheduler
 
+_UPDATE_FUNCTIONS = {
+    "hebbian": hierarchical_relaxation_step,
+    "autodiff": hierarchical_relaxation_step_autodiff,
+}
 
-def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
+
+def _make_jit_relax_step(layer_sizes, lr, lr_w, lam, update_fn=None):
     """Create a JIT-compiled relaxation step for fixed layer structure.
 
     Hyperparameters (lr, lr_w, lam) are closed over as constants.
     output_supervision is a runtime parameter to support annealing.
+
+    Args:
+        update_fn: the relaxation step function to use (Hebbian or autodiff).
+            Defaults to hierarchical_relaxation_step.
     """
+    if update_fn is None:
+        update_fn = hierarchical_relaxation_step
 
     @jax.jit
     def jit_step(reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s,
@@ -33,7 +45,7 @@ def _make_jit_relax_step(layer_sizes, lr, lr_w, lam):
                  output_target, sup_strength):
         """JIT-friendly relaxation step with optional clamping + supervision."""
         new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_skip_b, new_temp_w = \
-            hierarchical_relaxation_step(
+            update_fn(
                 reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s,
                 layer_sizes, lr, lr_w, lam,
                 output_target=output_target,
@@ -60,7 +72,8 @@ class HierarchicalTrainer:
                  teacher_forcing_ratio=1.0,
                  tf_min=0.0, tf_anneal_steps=0,
                  output_supervision=0.0,
-                 sup_min=0.0, sup_anneal_steps=0):
+                 sup_min=0.0, sup_anneal_steps=0,
+                 weight_update="hebbian"):
         """Initialize hierarchical PC trainer.
 
         Args:
@@ -73,7 +86,14 @@ class HierarchicalTrainer:
             output_supervision: strength of soft target signal at output layer (0=none).
             sup_min: minimum supervision after annealing.
             sup_anneal_steps: steps to anneal supervision from initial to min (0=no annealing).
+            weight_update: "hebbian" (outer-product) or "autodiff" (jax.grad).
         """
+        if weight_update not in _UPDATE_FUNCTIONS:
+            raise ValueError(
+                f"weight_update must be one of {list(_UPDATE_FUNCTIONS.keys())}, "
+                f"got {weight_update!r}"
+            )
+        self.weight_update = weight_update
         if layer_sizes is None:
             layer_sizes = [128, 64, 32, 64, 128]
         self.layer_sizes = layer_sizes
@@ -121,7 +141,8 @@ class HierarchicalTrainer:
         self._sup_anneal_steps = sup_anneal_steps
         self._rng = np.random.default_rng(42)
         self._jit_step = _make_jit_relax_step(
-            layer_sizes, lr, lr_w, lambda_sparse)
+            layer_sizes, lr, lr_w, lambda_sparse,
+            update_fn=_UPDATE_FUNCTIONS[weight_update])
 
     def _build_conditioning(self, cond_raw):
         """Expand conditioning vector (num_cat,) to input layer size (H_input,)."""
