@@ -62,6 +62,8 @@ class Command(BaseCommand):
         parser.add_argument("--weight-update", default="hebbian",
                             choices=["hebbian", "autodiff"],
                             help="Weight update method: hebbian (outer-product) or autodiff (jax.grad)")
+        parser.add_argument("--metrics-dir", default=None,
+                            help="Directory for JSONL metrics logging (default: same as checkpoint-dir)")
 
     def handle(self, *args, **options):
         index_path = options.get("index_path")
@@ -102,6 +104,7 @@ class Command(BaseCommand):
             curriculum_patience=options["curriculum_patience"],
             prefetch=True,
             weight_update=options["weight_update"],
+            metrics_dir=options.get("metrics_dir") or ckpt_dir,
         )
 
         if index_path:

@@ -17,6 +17,7 @@ import numpy as np
 from training.engine.hierarchical_grid import HierarchicalGridState, create_hierarchical_grid
 from training.engine.hierarchical_update import hierarchical_relaxation_step
 from training.engine.hierarchical_update_autodiff import hierarchical_relaxation_step_autodiff
+from training.engine.metrics_logger import MetricsLogger
 from corpus.services.batch_generator import BatchGenerator
 from corpus.services.curriculum import CurriculumScheduler
 
@@ -26,41 +27,109 @@ _UPDATE_FUNCTIONS = {
 }
 
 
-def _make_jit_relax_step(layer_sizes, lr, lr_w, lam, update_fn=None):
-    """Create a JIT-compiled relaxation step for fixed layer structure.
+def _make_jit_process_example(layer_sizes, relaxation_steps, lr, lr_w, lam,
+                               update_fn=None):
+    """Create a JIT-compiled function that processes one full training example.
 
-    Hyperparameters (lr, lr_w, lam) are closed over as constants.
-    output_supervision is a runtime parameter to support annealing.
+    Uses lax.fori_loop for relaxation steps and lax.scan over ticks,
+    reducing Python->JAX dispatches from T*relaxation_steps to 1 per example.
 
-    Args:
-        update_fn: the relaxation step function to use (Hebbian or autodiff).
-            Defaults to hierarchical_relaxation_step.
+    Hyperparameters (lr, lr_w, lam, relaxation_steps) are closed over.
     """
     if update_fn is None:
         update_fn = hierarchical_relaxation_step
 
-    @jax.jit
-    def jit_step(reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s,
-                 clamp_0, clamp_last, do_clamp_0, do_clamp_last,
-                 output_target, sup_strength):
-        """JIT-friendly relaxation step with optional clamping + supervision."""
-        new_reps, errors, new_pred_w, new_pred_b, new_skip_w, new_skip_b, new_temp_w = \
+    def _relax_body(_, carry):
+        """One relaxation step (called via lax.fori_loop)."""
+        (reps, pred_w, pred_b, skip_w, skip_b, temp_w,
+         temp_s, clamp_0, clamp_last, do_clamp_0, do_clamp_last,
+         output_target, sup, errors) = carry
+
+        new_reps, new_errors, new_pw, new_pb, new_sw, new_sb, new_tw = \
             update_fn(
                 reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s,
                 layer_sizes, lr, lr_w, lam,
-                output_target=output_target,
-                output_supervision=sup_strength,
+                output_target=output_target, output_supervision=sup,
             )
 
-        # Apply clamping post-hoc (always compute both, conditionally apply)
-        new_reps_out = list(new_reps)
-        new_reps_out[0] = jnp.where(do_clamp_0, clamp_0, new_reps_out[0])
-        new_reps_out[-1] = jnp.where(do_clamp_last, clamp_last, new_reps_out[-1])
+        clamped = list(new_reps)
+        clamped[0] = jnp.where(do_clamp_0, clamp_0, clamped[0])
+        clamped[-1] = jnp.where(do_clamp_last, clamp_last, clamped[-1])
 
-        return (new_reps_out, errors, new_pred_w, new_pred_b,
-                new_skip_w, new_skip_b, new_temp_w)
+        return (clamped, new_pw, new_pb, new_sw, new_sb, new_tw,
+                temp_s, clamp_0, clamp_last, do_clamp_0, do_clamp_last,
+                output_target, sup, new_errors)
 
-    return jit_step
+    def _tick_body(carry, x):
+        """Process one tick (called via lax.scan)."""
+        reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s, sup = carry
+        inp, tgt, do_tf, cond = x
+
+        input_with_cond = jnp.clip(inp + cond, 0.0, 1.0)
+        tgt_logit = jnp.where(tgt > 0.5, 3.0, -3.0)
+        init_errors = [jnp.zeros(s) for s in layer_sizes]
+
+        relax_init = (reps, pred_w, pred_b, skip_w, skip_b, temp_w,
+                      temp_s, input_with_cond, tgt_logit,
+                      jnp.bool_(True), do_tf,
+                      tgt_logit, sup, init_errors)
+        relax_out = jax.lax.fori_loop(0, relaxation_steps, _relax_body,
+                                       relax_init)
+
+        new_reps = relax_out[0]
+        new_pw, new_pb = relax_out[1], relax_out[2]
+        new_sw, new_sb = relax_out[3], relax_out[4]
+        new_tw = relax_out[5]
+
+        output = jax.nn.sigmoid(new_reps[-1])
+        error = jnp.mean(jnp.abs(output - tgt))
+        active_mask = tgt > 0.0
+        active_count = jnp.sum(active_mask)
+        active_err = jnp.where(
+            active_count > 0,
+            jnp.sum(jnp.abs(output - tgt) * active_mask) / active_count,
+            jnp.float32(0.0),
+        )
+
+        # Current reps become temporal state for next tick
+        new_carry = (new_reps, new_pw, new_pb, new_sw, new_sb, new_tw,
+                     new_reps, sup)
+        return new_carry, (error, active_err, output)
+
+    @jax.jit
+    def process_example(inp_seq, tgt_seq, cond_broadcast, tf_decisions,
+                        reps, pred_w, pred_b, skip_w, skip_b, temp_w,
+                        temp_s, sup):
+        """Process one full example (all ticks x all relaxation steps).
+
+        Returns (pred_w, pred_b, skip_w, skip_b, temp_w,
+                 avg_error, avg_active, tp, fp, fn).
+        """
+        xs = (inp_seq, tgt_seq, tf_decisions, cond_broadcast)
+        init = (reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s, sup)
+        final, per_tick = jax.lax.scan(_tick_body, init, xs)
+
+        final_pw, final_pb = final[1], final[2]
+        final_sw, final_sb = final[3], final[4]
+        final_tw = final[5]
+
+        errors, active_errs, outputs = per_tick
+        avg_error = jnp.mean(errors)
+        avg_active = jnp.mean(active_errs)
+
+        # F1 at last tick
+        last_output = outputs[-1]
+        last_tgt = tgt_seq[-1]
+        pred_binary = (last_output > 0.5).astype(jnp.float32)
+        target_binary = (last_tgt > 0.0).astype(jnp.float32)
+        tp = jnp.sum(pred_binary * target_binary)
+        fp = jnp.sum(pred_binary * (1.0 - target_binary))
+        fn = jnp.sum((1.0 - pred_binary) * target_binary)
+
+        return (final_pw, final_pb, final_sw, final_sb, final_tw,
+                avg_error, avg_active, tp, fp, fn)
+
+    return process_example
 
 
 class HierarchicalTrainer:
@@ -73,7 +142,8 @@ class HierarchicalTrainer:
                  tf_min=0.0, tf_anneal_steps=0,
                  output_supervision=0.0,
                  sup_min=0.0, sup_anneal_steps=0,
-                 weight_update="hebbian"):
+                 weight_update="hebbian",
+                 metrics_dir=None):
         """Initialize hierarchical PC trainer.
 
         Args:
@@ -87,6 +157,7 @@ class HierarchicalTrainer:
             sup_min: minimum supervision after annealing.
             sup_anneal_steps: steps to anneal supervision from initial to min (0=no annealing).
             weight_update: "hebbian" (outer-product) or "autodiff" (jax.grad).
+            metrics_dir: directory for JSONL metrics logging (None=disabled).
         """
         if weight_update not in _UPDATE_FUNCTIONS:
             raise ValueError(
@@ -139,9 +210,10 @@ class HierarchicalTrainer:
         self._sup_initial = output_supervision
         self._sup_min = sup_min
         self._sup_anneal_steps = sup_anneal_steps
+        self._metrics_logger = MetricsLogger(metrics_dir) if metrics_dir else None
         self._rng = np.random.default_rng(42)
-        self._jit_step = _make_jit_relax_step(
-            layer_sizes, lr, lr_w, lambda_sparse,
+        self._jit_process = _make_jit_process_example(
+            layer_sizes, relaxation_steps, lr, lr_w, lambda_sparse,
             update_fn=_UPDATE_FUNCTIONS[weight_update])
 
     def _build_conditioning(self, cond_raw):
@@ -194,14 +266,33 @@ class HierarchicalTrainer:
         total_active_error = 0.0
         total_tp, total_fp, total_fn = 0.0, 0.0, 0.0
 
+        T = all_inputs.shape[1]
+        sup = jnp.float32(self.output_supervision)
+
         for b in range(batch_size):
-            inp_seq = all_inputs[b]   # (T, H_in)
-            tgt_seq = all_targets[b]  # (T, H_out)
-            cond = all_conds[b]       # (H_in,)
+            inp_seq = jnp.array(all_inputs[b])   # (T, H_in)
+            tgt_seq = jnp.array(all_targets[b])   # (T, H_out)
+            cond = jnp.array(all_conds[b])         # (H_in,)
+
+            # Pre-sample TF decisions and broadcast cond for scan
+            tf_decisions = jnp.array(
+                self._rng.random(T) < self.teacher_forcing_ratio)
+            cond_broadcast = jnp.broadcast_to(cond, (T, h_input))
+
+            result = self._jit_process(
+                inp_seq, tgt_seq, cond_broadcast, tf_decisions,
+                list(self.grid.representations),
+                list(self.grid.prediction_weights),
+                list(self.grid.prediction_biases),
+                list(self.grid.skip_weights),
+                list(self.grid.skip_biases),
+                list(self.grid.temporal_weights),
+                list(self.grid.temporal_state),
+                sup,
+            )
 
             ex_pred_w, ex_pred_b, ex_skip_w, ex_skip_b, ex_temp_w, \
-                ex_error, ex_active, tp, fp, fn = \
-                self._process_example(inp_seq, tgt_seq, cond)
+                ex_error, ex_active, tp, fp, fn = result
 
             for i in range(len(acc_pred_w)):
                 acc_pred_w[i] = acc_pred_w[i] + ex_pred_w[i]
@@ -214,11 +305,11 @@ class HierarchicalTrainer:
             for i in range(len(acc_temp_w)):
                 acc_temp_w[i] = acc_temp_w[i] + ex_temp_w[i]
 
-            total_error += ex_error
-            total_active_error += ex_active
-            total_tp += tp
-            total_fp += fp
-            total_fn += fn
+            total_error += float(ex_error)
+            total_active_error += float(ex_active)
+            total_tp += float(tp)
+            total_fp += float(fp)
+            total_fn += float(fn)
 
         # Average across batch
         self.grid.prediction_weights = [w / batch_size for w in acc_pred_w]
@@ -235,7 +326,7 @@ class HierarchicalTrainer:
         recall = total_tp / max(total_tp + total_fn, 1.0)
         f1 = 2 * precision * recall / max(precision + recall, 1e-8)
 
-        return avg_error, {
+        meta = {
             "datasets": batch.get("datasets", []),
             "active_error": avg_active,
             "precision": precision,
@@ -244,79 +335,19 @@ class HierarchicalTrainer:
             "teacher_forcing": self.teacher_forcing_ratio,
         }
 
-    def _process_example(self, inp_seq, tgt_seq, cond):
-        """Process one example: iterate over ticks with relaxation.
+        if self._metrics_logger:
+            self._metrics_logger.log_step(
+                self._step_count,
+                error=avg_error,
+                active_error=avg_active,
+                f1=f1,
+                precision=precision,
+                recall=recall,
+                tf_ratio=self.teacher_forcing_ratio,
+                phase=self.curriculum.current_phase,
+            )
 
-        Returns updated weights and error metrics.
-        """
-        T = inp_seq.shape[0]
-        reps = list(self.grid.representations)
-        pred_w = list(self.grid.prediction_weights)
-        pred_b = list(self.grid.prediction_biases)
-        skip_w = list(self.grid.skip_weights)
-        skip_b = list(self.grid.skip_biases)
-        temp_w = list(self.grid.temporal_weights)
-        temp_s = list(self.grid.temporal_state)
-
-        total_error = 0.0
-        total_active = 0.0
-        last_output = None
-
-        for t in range(T):
-            inp = jnp.array(inp_seq[t])   # (H_in,)
-            tgt = jnp.array(tgt_seq[t])   # (H_out,)
-
-            # Add conditioning to input
-            input_with_cond = inp + jnp.array(cond)
-            input_with_cond = jnp.clip(input_with_cond, 0.0, 1.0)
-
-            # Convert target to logit space for output clamping:
-            # sigmoid(3.0) ≈ 0.95, sigmoid(-3.0) ≈ 0.05
-            # This gives the representations a meaningful dynamic range
-            tgt_logit = jnp.where(tgt > 0.5, 3.0, -3.0)
-
-            # Teacher forcing: clamp output on some ticks
-            do_clamp_output = self._rng.random() < self.teacher_forcing_ratio
-
-            # Relaxation loop (JIT-compiled inner step)
-            do_clamp_0 = jnp.bool_(True)
-            do_clamp_last = jnp.bool_(do_clamp_output)
-            sup = jnp.float32(self.output_supervision)
-            for step in range(self.relaxation_steps):
-                reps, errors, pred_w, pred_b, skip_w, skip_b, temp_w = self._jit_step(
-                    reps, pred_w, pred_b, skip_w, skip_b, temp_w, temp_s,
-                    input_with_cond, tgt_logit,
-                    do_clamp_0, do_clamp_last,
-                    tgt_logit, sup,
-                )
-
-            # Compute error at output layer
-            output = jax.nn.sigmoid(reps[-1])
-            error = float(jnp.mean(jnp.abs(output - tgt)))
-            total_error += error
-
-            # Active error (only on non-zero target notes)
-            active_mask = tgt > 0.0
-            active_count = float(jnp.sum(active_mask))
-            if active_count > 0:
-                active_err = float(jnp.sum(jnp.abs(output - tgt) * active_mask) / active_count)
-                total_active += active_err
-
-            # Update temporal state for next tick
-            temp_s = [r.copy() for r in reps]
-            last_output = output
-
-        # F1 at last tick
-        if last_output is not None:
-            pred_binary = (last_output > 0.5).astype(jnp.float32)
-            target_binary = (jnp.array(tgt_seq[-1]) > 0.0).astype(jnp.float32)
-            tp = float(jnp.sum(pred_binary * target_binary))
-            fp = float(jnp.sum(pred_binary * (1.0 - target_binary)))
-            fn = float(jnp.sum((1.0 - pred_binary) * target_binary))
-        else:
-            tp, fp, fn = 0.0, 0.0, 0.0
-
-        return pred_w, pred_b, skip_w, skip_b, temp_w, total_error / max(T, 1), total_active / max(T, 1), tp, fp, fn  # noqa: E501
+        return avg_error, meta
 
     def save_checkpoint(self, path):
         """Save hierarchical grid state to directory."""
