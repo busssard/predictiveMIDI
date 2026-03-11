@@ -158,28 +158,67 @@ class TrainingRunsListView(APIView):
 
 
 class CheckpointListView(APIView):
-    """GET list of auto-saved checkpoints."""
+    """GET list of auto-saved checkpoints (flat and hierarchical)."""
 
     def get(self, request):
-        ckpt_dir = Path(settings.CHECKPOINT_DIR)
-        if not ckpt_dir.exists():
-            return Response({"checkpoints": []})
-
         checkpoints = []
-        for d in sorted(ckpt_dir.iterdir()):
-            if d.is_dir() and d.name.startswith("step_"):
-                state_file = d / "state.npy"
-                if state_file.exists():
-                    step_str = d.name.replace("step_", "")
+
+        # 1) Scan flat checkpoints from CHECKPOINT_DIR
+        ckpt_dir = Path(settings.CHECKPOINT_DIR)
+        if ckpt_dir.exists():
+            for d in sorted(ckpt_dir.iterdir()):
+                if d.is_dir() and d.name.startswith("step_"):
+                    state_file = d / "state.npy"
+                    if state_file.exists():
+                        step_str = d.name.replace("step_", "")
+                        try:
+                            step = int(step_str)
+                        except ValueError:
+                            continue
+                        checkpoints.append({
+                            "name": d.name,
+                            "step": step,
+                            "timestamp": state_file.stat().st_mtime,
+                            "architecture": "flat",
+                        })
+
+        # 2) Scan hierarchical checkpoint directories
+        base_dir = Path(settings.BASE_DIR)
+        for hier_dir in sorted(base_dir.glob("checkpoints_hierarchical*")):
+            if not hier_dir.is_dir():
+                continue
+            for sub in sorted(hier_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                meta_file = sub / "metadata.json"
+                if not meta_file.exists():
+                    continue
+                try:
+                    metadata = json.loads(meta_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if metadata.get("architecture") != "hierarchical":
+                    continue
+                # Parse step number from name, or use -1 for 'final'
+                if sub.name.startswith("step_"):
+                    step_str = sub.name.replace("step_", "")
                     try:
                         step = int(step_str)
                     except ValueError:
-                        continue
-                    checkpoints.append({
-                        "name": d.name,
-                        "step": step,
-                        "timestamp": state_file.stat().st_mtime,
-                    })
+                        step = -1
+                elif sub.name == "final":
+                    step = -1
+                else:
+                    continue
+                # Use relative path from BASE_DIR as the name
+                rel_name = f"{hier_dir.name}/{sub.name}"
+                checkpoints.append({
+                    "name": rel_name,
+                    "step": step,
+                    "timestamp": meta_file.stat().st_mtime,
+                    "architecture": "hierarchical",
+                    "layer_sizes": metadata.get("layer_sizes", []),
+                })
 
         return Response({"checkpoints": checkpoints})
 
