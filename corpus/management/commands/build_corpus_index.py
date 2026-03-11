@@ -145,6 +145,8 @@ class Command(BaseCommand):
         parser.add_argument("--max-tempo", type=float, default=300.0)
         parser.add_argument("--max-instruments", type=int, default=12)
         parser.add_argument("--min-notes-per-instrument", type=int, default=10)
+        parser.add_argument("--refilter", action="store_true",
+                            help="Re-apply quality filters to existing index entries")
 
     def handle(self, *args, **options):
         midi_dir = Path(options["midi_dir"])
@@ -172,10 +174,80 @@ class Command(BaseCommand):
             existing_paths = {s["source_paths"][0] for s in existing_songs}
             self.stdout.write(f"  {len(existing_songs)} songs already indexed\n")
 
+        # Re-apply quality filters to existing entries
+        if options.get("refilter") and existing_songs:
+            self.stdout.write("Re-filtering existing songs...")
+            before = len(existing_songs)
+            filtered = []
+            for song in existing_songs:
+                if not song_passes_filters(
+                    song,
+                    min_tempo=quality_opts["min_tempo"],
+                    max_tempo=quality_opts["max_tempo"],
+                    max_duration=quality_opts["max_duration"],
+                ):
+                    continue
+                song["instruments"] = select_top_instruments(
+                    song["instruments"],
+                    max_instruments=quality_opts["max_instruments"],
+                    min_notes=quality_opts["min_notes_per_instrument"],
+                )
+                if len(song["instruments"]) < min_inst:
+                    continue
+                song["quality_score"] = compute_quality_score(song)
+                filtered.append(song)
+            existing_songs = filtered
+            existing_paths = {s["source_paths"][0] for s in existing_songs}
+            self.stdout.write(
+                f"  Kept {len(existing_songs)} of {before} "
+                f"({before - len(existing_songs)} removed)\n"
+            )
+            # Save refiltered index immediately so it's not lost on Ctrl+C
+            vocabulary = build_vocabulary(existing_songs)
+            index = {
+                "version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "fs": 8.0,
+                "vocabulary": vocabulary,
+                "stats": {"total_songs": len(existing_songs)},
+                "songs": existing_songs,
+            }
+            tmp_path = output_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(index, f, separators=(",", ":"))
+            os.replace(tmp_path, output_path)
+            self.stdout.write("  Refiltered index saved.\n")
+
         new_songs = []
         stats_by_dataset = {}
 
         selected = options["datasets"]
+
+        def save_progress(label=""):
+            """Save index to disk (atomic write). Safe to call anytime."""
+            all_songs = existing_songs + new_songs
+            if not all_songs:
+                return
+            vocabulary = build_vocabulary(all_songs)
+            index = {
+                "version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "fs": 8.0,
+                "vocabulary": vocabulary,
+                "stats": {
+                    "total_songs": len(all_songs),
+                    "by_dataset": stats_by_dataset,
+                },
+                "songs": all_songs,
+            }
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = output_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(index, f, separators=(",", ":"))
+            os.replace(tmp_path, output_path)
+            if label:
+                self.stdout.write(
+                    f"  Saved {len(all_songs)} songs after {label}\n")
 
         # --- Lakh ---
         if selected is None or "lakh" in selected:
@@ -185,6 +257,8 @@ class Command(BaseCommand):
             )
             new_songs.extend(lakh_songs)
             stats_by_dataset["lakh"] = len(lakh_songs)
+            existing_paths.update(s["source_paths"][0] for s in lakh_songs)
+            save_progress("lakh")
 
         # --- AAM ---
         if selected is None or "aam" in selected:
@@ -194,6 +268,8 @@ class Command(BaseCommand):
             )
             new_songs.extend(aam_songs)
             stats_by_dataset["aam"] = len(aam_songs)
+            existing_paths.update(s["source_paths"][0] for s in aam_songs)
+            save_progress("aam")
 
         # --- Slakh ---
         if selected is None or "slakh" in selected:
@@ -203,8 +279,9 @@ class Command(BaseCommand):
             )
             new_songs.extend(slakh_songs)
             stats_by_dataset["slakh"] = len(slakh_songs)
+            save_progress("slakh")
 
-        # Merge with existing
+        # Final summary
         all_songs = existing_songs + new_songs
         self.stdout.write(f"\nTotal songs: {len(all_songs)}\n")
 
@@ -212,31 +289,10 @@ class Command(BaseCommand):
             self.stderr.write("No songs to index. Check --midi-dir path.\n")
             return
 
-        vocabulary = build_vocabulary(all_songs)
-
-        index = {
-            "version": 1,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "fs": 8.0,
-            "vocabulary": vocabulary,
-            "stats": {
-                "total_songs": len(all_songs),
-                "by_dataset": stats_by_dataset,
-            },
-            "songs": all_songs,
-        }
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(".json.tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(index, f, separators=(",", ":"))
-        os.replace(tmp_path, output_path)
-
         size_mb = output_path.stat().st_size / 1024 / 1024
         self.stdout.write(
-            f"Index written to {output_path}\n"
+            f"Index at {output_path}\n"
             f"  Songs: {len(all_songs)}\n"
-            f"  Vocabulary: {list(vocabulary.keys())}\n"
             f"  File size: {size_mb:.1f} MB\n"
         )
 
