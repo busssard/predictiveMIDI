@@ -14,6 +14,38 @@ from corpus.services.scanner import scan_midi_file
 from corpus.services.vocabulary import build_vocabulary
 
 
+def select_top_instruments(instruments, max_instruments=12, min_notes=10):
+    """Keep up to max_instruments, sorted by note_count descending.
+    Drop instruments with fewer than min_notes."""
+    valid = [inst for inst in instruments if inst["note_count"] >= min_notes]
+    valid.sort(key=lambda x: x["note_count"], reverse=True)
+    return valid[:max_instruments]
+
+
+def compute_quality_score(song):
+    """Compute a quality score 0.0-1.0 for a song based on tempo, duration, density."""
+    score = 1.0
+    if song["tempo"] < 40 or song["tempo"] > 240:
+        score *= 0.7
+    if song["duration"] < 5:
+        score *= 0.5
+    if song["duration"] > 300:
+        score *= 0.7
+    total_notes = sum(i["note_count"] for i in song["instruments"])
+    if total_notes / max(song["duration"], 1) < 0.5:
+        score *= 0.3
+    return round(score, 3)
+
+
+def song_passes_filters(song, min_tempo=30.0, max_tempo=300.0, max_duration=600.0):
+    """Check whether a song passes the tempo and duration filters."""
+    if song["tempo"] < min_tempo or song["tempo"] > max_tempo:
+        return False
+    if song["duration"] > max_duration:
+        return False
+    return True
+
+
 def _parse_aam_filename(filename):
     m = re.match(r"^(\d+)_(.+)\.mid$", filename, re.IGNORECASE)
     if m:
@@ -108,12 +140,26 @@ class Command(BaseCommand):
         )
         parser.add_argument("--min-instruments", type=int, default=2)
         parser.add_argument("--min-duration", type=float, default=2.0)
+        parser.add_argument("--max-duration", type=float, default=600.0)
+        parser.add_argument("--min-tempo", type=float, default=30.0)
+        parser.add_argument("--max-tempo", type=float, default=300.0)
+        parser.add_argument("--max-instruments", type=int, default=12)
+        parser.add_argument("--min-notes-per-instrument", type=int, default=10)
 
     def handle(self, *args, **options):
         midi_dir = Path(options["midi_dir"])
         output_path = Path(options["output"])
         min_inst = options["min_instruments"]
         min_dur = options["min_duration"]
+
+        # Quality filter options
+        quality_opts = {
+            "max_duration": options["max_duration"],
+            "min_tempo": options["min_tempo"],
+            "max_tempo": options["max_tempo"],
+            "max_instruments": options["max_instruments"],
+            "min_notes_per_instrument": options["min_notes_per_instrument"],
+        }
 
         # Load existing index for resumability
         existing_paths = set()
@@ -134,7 +180,8 @@ class Command(BaseCommand):
         # --- Lakh ---
         if selected is None or "lakh" in selected:
             lakh_songs = self._scan_lakh(
-                midi_dir / "lakh_midi", existing_paths, min_inst, min_dur
+                midi_dir / "lakh_midi", existing_paths, min_inst, min_dur,
+                quality_opts,
             )
             new_songs.extend(lakh_songs)
             stats_by_dataset["lakh"] = len(lakh_songs)
@@ -142,7 +189,8 @@ class Command(BaseCommand):
         # --- AAM ---
         if selected is None or "aam" in selected:
             aam_songs = self._scan_aam(
-                midi_dir / "aam_midi", existing_paths, min_inst, min_dur
+                midi_dir / "aam_midi", existing_paths, min_inst, min_dur,
+                quality_opts,
             )
             new_songs.extend(aam_songs)
             stats_by_dataset["aam"] = len(aam_songs)
@@ -151,7 +199,7 @@ class Command(BaseCommand):
         if selected is None or "slakh" in selected:
             slakh_songs = self._scan_slakh(
                 midi_dir / "slakh2100_midi" / "slakh2100_flac_redux",
-                existing_paths, min_inst, min_dur,
+                existing_paths, min_inst, min_dur, quality_opts,
             )
             new_songs.extend(slakh_songs)
             stats_by_dataset["slakh"] = len(slakh_songs)
@@ -209,19 +257,33 @@ class Command(BaseCommand):
             for inst in instruments
         ]
 
-    def _make_song(self, result, dataset, **extra):
-        """Normalize a scan_midi_file result into the index format."""
+    def _make_song(self, result, dataset, quality_opts=None, **extra):
+        """Normalize a scan_midi_file result into the index format.
+
+        Applies instrument selection and quality score if quality_opts given.
+        """
+        instruments = self._normalize_instruments(result["instruments"])
+
+        if quality_opts:
+            instruments = select_top_instruments(
+                instruments,
+                max_instruments=quality_opts["max_instruments"],
+                min_notes=quality_opts["min_notes_per_instrument"],
+            )
+
         song = {
             "source_paths": result.get("source_paths", [result["path"]]),
-            "instruments": self._normalize_instruments(result["instruments"]),
+            "instruments": instruments,
             "tempo": float(result["tempo"]),
             "duration": float(result["duration"]),
             "dataset": dataset,
         }
         song.update(extra)
+        song["quality_score"] = compute_quality_score(song)
         return song
 
-    def _scan_lakh(self, base_dir, existing_paths, min_inst, min_dur):
+    def _scan_lakh(self, base_dir, existing_paths, min_inst, min_dur,
+                   quality_opts=None):
         """Lakh: each .mid under lmd_full/ is one song."""
         lmd_dir = base_dir / "lmd_full"
         if not lmd_dir.is_dir():
@@ -252,13 +314,31 @@ class Command(BaseCommand):
                 continue
 
             result["source_paths"] = [spath]
-            songs.append(self._make_song(result, "lakh"))
+            song = self._make_song(result, "lakh", quality_opts=quality_opts)
+
+            # Apply quality filters (tempo/duration bounds)
+            if quality_opts and not song_passes_filters(
+                song,
+                min_tempo=quality_opts["min_tempo"],
+                max_tempo=quality_opts["max_tempo"],
+                max_duration=quality_opts["max_duration"],
+            ):
+                progress.record_skip("quality_filtered")
+                continue
+
+            # Reject songs with <min_inst valid instruments after selection
+            if len(song["instruments"]) < min_inst:
+                progress.record_skip("few_instruments_after_filter")
+                continue
+
+            songs.append(song)
             progress.record_ok()
 
         progress.finish()
         return songs
 
-    def _scan_aam(self, base_dir, existing_paths, min_inst, min_dur):
+    def _scan_aam(self, base_dir, existing_paths, min_inst, min_dur,
+                  quality_opts=None):
         """AAM: group {songID}_{Instrument}.mid files into songs."""
         if not base_dir.is_dir():
             self.stdout.write(f"[aam] not found at {base_dir}, skipping\n")
@@ -312,18 +392,44 @@ class Command(BaseCommand):
                 progress.record_skip("too_short")
                 continue
 
-            songs.append({
+            # Build song dict, then apply quality filters
+            instruments = self._normalize_instruments(all_instruments)
+            if quality_opts:
+                instruments = select_top_instruments(
+                    instruments,
+                    max_instruments=quality_opts["max_instruments"],
+                    min_notes=quality_opts["min_notes_per_instrument"],
+                )
+
+            song = {
                 "source_paths": ok_paths,
-                "instruments": self._normalize_instruments(all_instruments),
+                "instruments": instruments,
                 "tempo": float(tempos[0]),
                 "duration": float(max(durations)),
                 "dataset": "aam",
-            })
+            }
+            song["quality_score"] = compute_quality_score(song)
+
+            if quality_opts and not song_passes_filters(
+                song,
+                min_tempo=quality_opts["min_tempo"],
+                max_tempo=quality_opts["max_tempo"],
+                max_duration=quality_opts["max_duration"],
+            ):
+                progress.record_skip("quality_filtered")
+                continue
+
+            if len(song["instruments"]) < min_inst:
+                progress.record_skip("few_instruments_after_filter")
+                continue
+
+            songs.append(song)
 
         progress.finish()
         return songs
 
-    def _scan_slakh(self, base_dir, existing_paths, min_inst, min_dur):
+    def _scan_slakh(self, base_dir, existing_paths, min_inst, min_dur,
+                    quality_opts=None):
         """Slakh: use all_src.mid, fallback to MIDI/S*.mid stems."""
         if not base_dir.is_dir():
             self.stdout.write(f"[slakh] not found at {base_dir}, skipping\n")
@@ -364,7 +470,24 @@ class Command(BaseCommand):
                     continue
 
                 result["source_paths"] = [spath]
-                songs.append(self._make_song(result, "slakh", split=split))
+                song = self._make_song(
+                    result, "slakh", quality_opts=quality_opts, split=split,
+                )
+
+                if quality_opts and not song_passes_filters(
+                    song,
+                    min_tempo=quality_opts["min_tempo"],
+                    max_tempo=quality_opts["max_tempo"],
+                    max_duration=quality_opts["max_duration"],
+                ):
+                    progress.record_skip("quality_filtered")
+                    continue
+
+                if len(song["instruments"]) < min_inst:
+                    progress.record_skip("few_instruments_after_filter")
+                    continue
+
+                songs.append(song)
                 progress.record_ok()
             else:
                 # Fallback: merge stems
@@ -408,14 +531,39 @@ class Command(BaseCommand):
                     progress.record_skip("too_short")
                     continue
 
-                songs.append({
+                # Build song dict, then apply quality filters
+                instruments = self._normalize_instruments(all_instruments)
+                if quality_opts:
+                    instruments = select_top_instruments(
+                        instruments,
+                        max_instruments=quality_opts["max_instruments"],
+                        min_notes=quality_opts["min_notes_per_instrument"],
+                    )
+
+                song = {
                     "source_paths": ok_stems,
-                    "instruments": self._normalize_instruments(all_instruments),
+                    "instruments": instruments,
                     "tempo": float(tempos[0]),
                     "duration": float(max(durations)),
                     "dataset": "slakh",
                     "split": split,
-                })
+                }
+                song["quality_score"] = compute_quality_score(song)
+
+                if quality_opts and not song_passes_filters(
+                    song,
+                    min_tempo=quality_opts["min_tempo"],
+                    max_tempo=quality_opts["max_tempo"],
+                    max_duration=quality_opts["max_duration"],
+                ):
+                    progress.record_skip("quality_filtered")
+                    continue
+
+                if len(song["instruments"]) < min_inst:
+                    progress.record_skip("few_instruments_after_filter")
+                    continue
+
+                songs.append(song)
                 progress.record_ok()
 
         progress.finish()
