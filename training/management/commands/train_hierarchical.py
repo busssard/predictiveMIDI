@@ -59,6 +59,9 @@ class Command(BaseCommand):
                             help="Checkpoint directory (default: checkpoints_hierarchical/)")
         parser.add_argument("--resume-from", default=None,
                             help="Load weights from this checkpoint before training")
+        parser.add_argument("--weight-update", default="hebbian",
+                            choices=["hebbian", "autodiff"],
+                            help="Weight update method: hebbian (outer-product) or autodiff (jax.grad)")
 
     def handle(self, *args, **options):
         index_path = options.get("index_path")
@@ -98,6 +101,7 @@ class Command(BaseCommand):
             curriculum_phases=curriculum_phases,
             curriculum_patience=options["curriculum_patience"],
             prefetch=True,
+            weight_update=options["weight_update"],
         )
 
         if index_path:
@@ -117,6 +121,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Architecture: {options['layer_sizes']}")
         self.stdout.write(f"Teacher forcing: {options['teacher_forcing']}")
         self.stdout.write(f"Relaxation steps: {options['relaxation_steps']}")
+        self.stdout.write(f"Weight update: {options['weight_update']}")
 
         run = TrainingRun.objects.create(
             status="running",
