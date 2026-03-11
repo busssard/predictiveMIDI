@@ -1,10 +1,14 @@
 """Tests for quality filtering and instrument selection."""
 
+import json
 import pytest
 from corpus.management.commands.build_corpus_index import (
     select_top_instruments,
     compute_quality_score,
 )
+from corpus.services.batch_generator import BatchGenerator
+from corpus.services.vocabulary import build_vocabulary
+from corpus.tests.test_scanner import make_test_midi
 
 
 def _make_instrument(program=0, is_drum=False, note_count=50, pitch_range=None):
@@ -202,3 +206,164 @@ class TestQualityFilterIntegration:
                                    max_duration=600.0)
         assert song_passes_filters(at_max_dur, min_tempo=30.0, max_tempo=300.0,
                                    max_duration=600.0)
+
+
+def _make_index_with_quality(tmp_path, songs):
+    """Write a corpus index with quality_score fields and return its path."""
+    vocabulary = build_vocabulary(songs)
+    index = {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "fs": 8.0,
+        "vocabulary": vocabulary,
+        "stats": {"total_songs": len(songs)},
+        "songs": songs,
+    }
+    index_path = tmp_path / "corpus_index.json"
+    with open(index_path, "w") as f:
+        json.dump(index, f)
+    return index_path
+
+
+def _make_real_songs(tmp_path, quality_scores):
+    """Create real MIDI files and return scan-result-like dicts with quality scores."""
+    songs = []
+    for i, qs in enumerate(quality_scores):
+        path = tmp_path / "midi" / f"song{i}.mid"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make_test_midi(path, [
+            ("Piano", 0, False, [
+                (60 + j, j * 0.5, (j + 1) * 0.5, 100) for j in range(8)
+            ]),
+            ("Bass", 32, False, [
+                (36, j * 0.5, (j + 1) * 0.5, 80) for j in range(8)
+            ]),
+            ("Drums", 0, True, [
+                (36, j * 0.5, j * 0.5 + 0.25, 100) for j in range(8)
+            ]),
+        ])
+        songs.append({
+            "source_paths": [str(path)],
+            "instruments": [
+                {"program": 0, "is_drum": False, "note_count": 8, "pitch_range": [60, 67]},
+                {"program": 32, "is_drum": False, "note_count": 8, "pitch_range": [36, 36]},
+                {"program": 0, "is_drum": True, "note_count": 8, "pitch_range": [36, 36]},
+            ],
+            "tempo": 120.0,
+            "duration": 4.0,
+            "dataset": "test",
+            "quality_score": qs,
+        })
+    return songs
+
+
+class TestQualityAwareBatchSampling:
+    def test_quality_threshold_filters_songs(self, tmp_path):
+        """Songs below quality_threshold should be excluded from training."""
+        songs = _make_real_songs(tmp_path, [0.3, 0.5, 0.8, 1.0])
+        index_path = _make_index_with_quality(tmp_path, songs)
+        gen = BatchGenerator(
+            midi_dir=str(tmp_path / "midi"),
+            index_path=str(index_path),
+            test_fraction=0,
+            quality_threshold=0.6,
+        )
+        # Only songs with quality_score >= 0.6 should remain (0.8 and 1.0)
+        assert len(gen.song_paths) == 2
+
+    def test_quality_threshold_zero_keeps_all(self, tmp_path):
+        """Default threshold 0.0 should keep all songs."""
+        songs = _make_real_songs(tmp_path, [0.1, 0.5, 0.9])
+        index_path = _make_index_with_quality(tmp_path, songs)
+        gen = BatchGenerator(
+            midi_dir=str(tmp_path / "midi"),
+            index_path=str(index_path),
+            test_fraction=0,
+            quality_threshold=0.0,
+        )
+        assert len(gen.song_paths) == 3
+
+    def test_quality_threshold_with_scan_results(self, tmp_path):
+        """Quality filtering should work with scan_results too."""
+        songs = _make_real_songs(tmp_path, [0.2, 0.4, 0.7])
+        gen = BatchGenerator(
+            midi_dir=str(tmp_path / "midi"),
+            scan_results=songs,
+            test_fraction=0,
+            quality_threshold=0.5,
+        )
+        # Only song with quality_score 0.7 should remain
+        assert len(gen.song_paths) == 1
+
+    def test_songs_without_quality_score_always_included(self, tmp_path):
+        """Songs missing quality_score (legacy index) should be included."""
+        path = tmp_path / "midi" / "song0.mid"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make_test_midi(path, [
+            ("Piano", 0, False, [
+                (60 + j, j * 0.5, (j + 1) * 0.5, 100) for j in range(8)
+            ]),
+            ("Bass", 32, False, [
+                (36, j * 0.5, (j + 1) * 0.5, 80) for j in range(8)
+            ]),
+            ("Drums", 0, True, [
+                (36, j * 0.5, j * 0.5 + 0.25, 100) for j in range(8)
+            ]),
+        ])
+        songs = [{
+            "source_paths": [str(path)],
+            "instruments": [
+                {"program": 0, "is_drum": False, "note_count": 8, "pitch_range": [60, 67]},
+                {"program": 32, "is_drum": False, "note_count": 8, "pitch_range": [36, 36]},
+                {"program": 0, "is_drum": True, "note_count": 8, "pitch_range": [36, 36]},
+            ],
+            "tempo": 120.0,
+            "duration": 4.0,
+            "dataset": "test",
+            # No quality_score field
+        }]
+        gen = BatchGenerator(
+            midi_dir=str(tmp_path / "midi"),
+            scan_results=songs,
+            test_fraction=0,
+            quality_threshold=0.5,
+        )
+        assert len(gen.song_paths) == 1
+
+    def test_piano_rolls_respect_instrument_list(self, tmp_path):
+        """_load_piano_rolls should only load instruments listed in scan entry."""
+        # Create a MIDI with 3 instruments but index only lists 2
+        path = tmp_path / "midi" / "song0.mid"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make_test_midi(path, [
+            ("Piano", 0, False, [
+                (60 + j, j * 0.5, (j + 1) * 0.5, 100) for j in range(8)
+            ]),
+            ("Bass", 32, False, [
+                (36, j * 0.5, (j + 1) * 0.5, 80) for j in range(8)
+            ]),
+            ("Drums", 0, True, [
+                (36, j * 0.5, j * 0.5 + 0.25, 100) for j in range(8)
+            ]),
+        ])
+        # Index entry only lists Piano and Bass (instruments at index 0, 1)
+        songs = [{
+            "source_paths": [str(path)],
+            "instruments": [
+                {"program": 0, "is_drum": False, "note_count": 8, "pitch_range": [60, 67]},
+                {"program": 32, "is_drum": False, "note_count": 8, "pitch_range": [36, 36]},
+                # Drums deliberately excluded from the index entry
+            ],
+            "tempo": 120.0,
+            "duration": 4.0,
+            "dataset": "test",
+            "quality_score": 1.0,
+        }]
+        gen = BatchGenerator(
+            midi_dir=str(tmp_path / "midi"),
+            scan_results=songs,
+            test_fraction=0,
+        )
+        rolls = gen._load_piano_rolls(str(path))
+        # Should only get 2 instruments (Piano and Bass), not 3
+        assert len(rolls) == 2

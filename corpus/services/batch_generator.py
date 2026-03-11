@@ -16,7 +16,8 @@ def _song_key(s):
 
 class BatchGenerator:
     def __init__(self, midi_dir, snippet_ticks=16, fs=8.0, rng_seed=None,
-                 scan_results=None, index_path=None, test_fraction=0.1):
+                 scan_results=None, index_path=None, test_fraction=0.1,
+                 quality_threshold=0.0):
         """
         Args:
             midi_dir: path to directory of MIDI files
@@ -26,6 +27,7 @@ class BatchGenerator:
             scan_results: optional pre-computed scan results (skips scan_directory)
             index_path: optional path to corpus_index.json (skips scanning)
             test_fraction: fraction of each dataset to hold out for testing
+            quality_threshold: minimum quality_score to include a song (0.0 keeps all)
         """
         self.midi_dir = Path(midi_dir)
         self.snippet_ticks = snippet_ticks
@@ -42,6 +44,13 @@ class BatchGenerator:
         else:
             songs = scan_directory(str(self.midi_dir))
             self.vocabulary = build_vocabulary(songs)
+
+        # Apply quality filtering before train/test split
+        if quality_threshold > 0.0:
+            songs = [
+                s for s in songs
+                if s.get("quality_score", 1.0) >= quality_threshold
+            ]
 
         train_songs, test_songs = self._split_train_test(songs, test_fraction)
 
@@ -99,6 +108,8 @@ class BatchGenerator:
         """Load a MIDI file and return per-instrument piano rolls.
 
         If the scan result has source_paths, loads from all listed files.
+        Only loads instruments that are listed in the scan entry's instruments
+        list (respecting quality filtering from the index).
 
         Returns list of (category, piano_roll) tuples.
         piano_roll shape: (128, total_ticks), values 0.0-1.0
@@ -108,7 +119,18 @@ class BatchGenerator:
         if not source_paths:
             source_paths = [path]
 
+        # Build allowed instrument set from the scan entry if available.
+        # Each entry is (program, is_drum) — we track how many of each
+        # are allowed so duplicates are handled correctly.
+        allowed = None
+        if scan and "instruments" in scan:
+            allowed = {}
+            for inst_info in scan["instruments"]:
+                key = (int(inst_info["program"]), bool(inst_info["is_drum"]))
+                allowed[key] = allowed.get(key, 0) + 1
+
         rolls = []
+        seen = {}  # track how many of each (program, is_drum) we've loaded
         for src in source_paths:
             try:
                 midi = pretty_midi.PrettyMIDI(str(src))
@@ -116,6 +138,13 @@ class BatchGenerator:
                 logger.warning("Failed to load MIDI %s: %s", src, e)
                 continue
             for inst in midi.instruments:
+                if allowed is not None:
+                    key = (inst.program, inst.is_drum)
+                    used = seen.get(key, 0)
+                    limit = allowed.get(key, 0)
+                    if used >= limit:
+                        continue
+                    seen[key] = used + 1
                 cat = categorize_instrument(inst.program, inst.is_drum)
                 roll = inst.get_piano_roll(fs=self.fs) / 127.0
                 rolls.append((cat, roll))
