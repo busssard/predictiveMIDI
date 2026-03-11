@@ -357,10 +357,19 @@ async function loadCheckpoints() {
         for (const c of ckpts) {
             const opt = document.createElement('option');
             opt.value = c.name;
-            opt.textContent = `${c.name} (step ${c.step})`;
+            const arch = c.architecture || 'flat';
+            const stepLabel = c.step >= 0 ? `step ${c.step}` : c.name.split('/').pop();
+            opt.textContent = `${c.name} (${stepLabel}, ${arch})`;
             sel.appendChild(opt);
         }
-        $('#checkpoint-list').textContent = `${ckpts.length} checkpoint${ckpts.length !== 1 ? 's' : ''} available`;
+        const nFlat = ckpts.filter(c => (c.architecture || 'flat') === 'flat').length;
+        const nHier = ckpts.filter(c => c.architecture === 'hierarchical').length;
+        const parts = [];
+        if (nFlat > 0) parts.push(`${nFlat} flat`);
+        if (nHier > 0) parts.push(`${nHier} hierarchical`);
+        $('#checkpoint-list').textContent = parts.length > 0
+            ? `${ckpts.length} checkpoint${ckpts.length !== 1 ? 's' : ''} (${parts.join(', ')})`
+            : 'no checkpoints';
     } catch {
         $('#checkpoint-list').textContent = 'no checkpoints';
     }
